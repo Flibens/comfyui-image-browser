@@ -32,6 +32,9 @@ Option 2 (git):
 ## Use :arrow_forward:
 In ComfyUI, click the **Image Browser** button in the top menu bar.
 
+## Metadata Note :information_source:
+If metadata isn’t showing, i recommend using custom nodes that write metadata, such as **LoRA Manager’s “Save Image with Metadata”** or any other **save-with-metadata** nodes.
+
 
 [![Buy Me A Coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=%E2%98%95&slug=flibens&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff)](https://www.buymeacoffee.com/flibens)
 
