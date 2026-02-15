@@ -14,6 +14,19 @@ document.addEventListener('DOMContentLoaded', () => {
     let isCompareMode = false;
     let selectedImages = [];
     let contextMenu = null;
+    let modalZoom = 1;
+    let modalPanX = 0;
+    let modalPanY = 0;
+    let isModalPanning = false;
+    let modalPanStartX = 0;
+    let modalPanStartY = 0;
+    let modalPanOriginX = 0;
+    let modalPanOriginY = 0;
+    let suppressNextModalStageClose = false;
+    let modalPanListenersBound = false;
+    const MODAL_MIN_ZOOM = 0.25;
+    const MODAL_MAX_ZOOM = 6;
+    const MODAL_ZOOM_STEP = 0.15;
 
     // --- DOM Elements ---
     const gallery = document.getElementById('gallery');
@@ -131,6 +144,138 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function getModalImageElement() {
+        return document.getElementById('modalZoomImage');
+    }
+
+    function getModalZoomStage() {
+        return document.getElementById('modalZoomStage');
+    }
+
+    function clampModalZoom(value) {
+        return Math.min(MODAL_MAX_ZOOM, Math.max(MODAL_MIN_ZOOM, value));
+    }
+
+    function clampModalPan() {
+        const image = getModalImageElement();
+        const stage = getModalZoomStage();
+        if (!image || !stage) return;
+
+        if (modalZoom <= 1) {
+            modalPanX = 0;
+            modalPanY = 0;
+            return;
+        }
+
+        const scaledWidth = image.clientWidth * modalZoom;
+        const scaledHeight = image.clientHeight * modalZoom;
+        const maxPanX = Math.max(0, (scaledWidth - stage.clientWidth) / 2);
+        const maxPanY = Math.max(0, (scaledHeight - stage.clientHeight) / 2);
+
+        modalPanX = Math.min(maxPanX, Math.max(-maxPanX, modalPanX));
+        modalPanY = Math.min(maxPanY, Math.max(-maxPanY, modalPanY));
+    }
+
+    function applyModalZoom() {
+        const image = getModalImageElement();
+        if (!image) return;
+
+        clampModalPan();
+        image.style.transform = `translate(${modalPanX}px, ${modalPanY}px) scale(${modalZoom})`;
+        image.style.cursor = isModalPanning ? 'grabbing' : (modalZoom > 1 ? 'grab' : 'default');
+
+        const zoomLabel = document.getElementById('modalZoomLevel');
+        if (zoomLabel) {
+            zoomLabel.textContent = `${Math.round(modalZoom * 100)}%`;
+        }
+    }
+
+    function setModalZoom(nextZoom) {
+        modalZoom = clampModalZoom(nextZoom);
+        if (modalZoom <= 1) {
+            modalPanX = 0;
+            modalPanY = 0;
+        }
+        applyModalZoom();
+    }
+
+    function resetModalZoom() {
+        modalPanX = 0;
+        modalPanY = 0;
+        setModalZoom(1);
+    }
+
+    function initModalZoomControls() {
+        const zoomInBtn = document.getElementById('modalZoomIn');
+        const zoomOutBtn = document.getElementById('modalZoomOut');
+        const zoomResetBtn = document.getElementById('modalZoomReset');
+        const zoomStage = document.getElementById('modalZoomStage');
+
+        if (!zoomInBtn || !zoomOutBtn || !zoomResetBtn || !zoomStage || !getModalImageElement()) {
+            return;
+        }
+
+        resetModalZoom();
+
+        zoomInBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setModalZoom(modalZoom + MODAL_ZOOM_STEP);
+        });
+
+        zoomOutBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setModalZoom(modalZoom - MODAL_ZOOM_STEP);
+        });
+
+        zoomResetBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            resetModalZoom();
+        });
+
+        zoomStage.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const zoomDelta = e.deltaY < 0 ? MODAL_ZOOM_STEP : -MODAL_ZOOM_STEP;
+            setModalZoom(modalZoom + zoomDelta);
+        }, { passive: false });
+
+        zoomStage.addEventListener('mousedown', (e) => {
+            if (e.button !== 0 || modalZoom <= 1) return;
+
+            isModalPanning = true;
+            modalPanStartX = e.clientX;
+            modalPanStartY = e.clientY;
+            modalPanOriginX = modalPanX;
+            modalPanOriginY = modalPanY;
+            suppressNextModalStageClose = false;
+            applyModalZoom();
+            e.preventDefault();
+        });
+
+        if (!modalPanListenersBound) {
+            document.addEventListener('mousemove', (e) => {
+                if (!isModalPanning) return;
+
+                const dx = e.clientX - modalPanStartX;
+                const dy = e.clientY - modalPanStartY;
+                if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+                    suppressNextModalStageClose = true;
+                }
+
+                modalPanX = modalPanOriginX + dx;
+                modalPanY = modalPanOriginY + dy;
+                applyModalZoom();
+            });
+
+            document.addEventListener('mouseup', () => {
+                if (!isModalPanning) return;
+                isModalPanning = false;
+                applyModalZoom();
+            });
+
+            modalPanListenersBound = true;
+        }
+    }
+
     async function handleContextMenuAction(action, imageData, card) {
         const imagePath = `/gemini-image-browser/thumbnail?filename=${encodeURIComponent(imageData.path)}&folder=${imageData.folder_id}`;
 
@@ -206,6 +351,18 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (error) {
             console.error('Error copying path:', error);
             showNotification('Failed to copy path', 'error');
+        }
+    }
+
+    async function copyPromptToClipboard(promptText, promptLabel = 'Prompt') {
+        if (!promptText) return;
+
+        try {
+            await navigator.clipboard.writeText(promptText);
+            showNotification(`${promptLabel} copied to clipboard`);
+        } catch (error) {
+            console.error(`Error copying ${promptLabel}:`, error);
+            showNotification(`Failed to copy ${promptLabel.toLowerCase()}`, 'error');
         }
     }
 
@@ -635,7 +792,17 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if (isAudio) {
             mediaContainer.innerHTML = `<div class="audio-modal-container"><div class="audio-modal-icon">♪</div><audio src="${url}" controls autoplay></audio></div>`;
         } else {
-            mediaContainer.innerHTML = `<img src="${url}" alt="">`;
+            mediaContainer.innerHTML = `
+                <div class="modal-zoom-controls">
+                    <button class="modal-zoom-btn" id="modalZoomOut" title="Zoom Out">-</button>
+                    <button class="modal-zoom-btn modal-zoom-btn-reset" id="modalZoomReset" title="Reset Zoom"><span id="modalZoomLevel">100%</span></button>
+                    <button class="modal-zoom-btn" id="modalZoomIn" title="Zoom In">+</button>
+                </div>
+                <div class="modal-zoom-stage" id="modalZoomStage">
+                    <img id="modalZoomImage" src="${url}" alt="">
+                </div>
+            `;
+            initModalZoomControls();
         }
 
         modal.classList.add('active');
@@ -646,10 +813,14 @@ document.addEventListener('DOMContentLoaded', () => {
         const isFavorite = imageData.is_favorite;
         metadataPanel.innerHTML = `
             <div class="modal-header-actions">
-                <button class="modal-action-btn ${isFavorite ? 'favorite' : ''}" onclick="toggleModalFavorite()">
+                <button id="modalFavoriteBtn" class="modal-action-btn ${isFavorite ? 'favorite' : ''}" onclick="toggleModalFavorite()">
                     <span class="ui-icon">${isFavorite ? '★' : '☆'}</span>
                     ${isFavorite ? 'Favorited' : 'Add to Favorites'}
                 </button>
+                <div class="modal-view-toggle">
+                    <button id="metadataViewBtn" class="modal-view-btn active" onclick="switchMetadataView('metadata')">Metadata</button>
+                    <button id="workflowViewBtn" class="modal-view-btn" onclick="switchMetadataView('workflow')">Workflow Nodes</button>
+                </div>
             </div>
             <div class="metadata-section">
                 <div class="metadata-section-header">
@@ -698,14 +869,26 @@ document.addEventListener('DOMContentLoaded', () => {
             </div>
             <div class="metadata-section">
                 <div class="metadata-section-header">
-                    <span class="icon ui-icon">▧</span> Other Metadata
+                    <span class="icon ui-icon">N</span> Workflow Node Inspector
                 </div>
-                <div class="metadata-section-content" id="otherMetaSection">
+                <div class="metadata-section-content" id="workflowNodesSection">
                     <p style="color: #888; margin: 0;">Loading...</p>
                 </div>
             </div>
             <button class="modal-delete-btn" onclick="deleteCurrentImage()">Delete Image</button>
         `;
+
+        const workflowContent = document.getElementById('workflowNodesSection');
+        const workflowSection = workflowContent ? workflowContent.closest('.metadata-section') : null;
+        if (workflowSection) {
+            workflowSection.id = 'workflowNodesView';
+            workflowSection.classList.add('workflow-section');
+            workflowSection.style.display = 'none';
+            const workflowHeader = workflowSection.querySelector('.metadata-section-header');
+            if (workflowHeader) {
+                workflowHeader.innerHTML = '<span class="icon ui-icon">N</span> Workflow Node Inspector';
+            }
+        }
 
         try {
             const metaUrl = `/gemini-image-browser/metadata?filename=${encodeURIComponent(imagePath)}&folder=${folderId}`;
@@ -715,6 +898,9 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (error) {
             document.getElementById('promptsSection').innerHTML =
                 `<p style="color: #dc3545;">Error loading metadata: ${error.message}</p>`;
+            if (workflowContent) {
+                workflowContent.innerHTML = `<p style="color: #dc3545; margin: 0;">Error loading workflow nodes: ${error.message}</p>`;
+            }
         }
     }
 
@@ -747,13 +933,76 @@ document.addEventListener('DOMContentLoaded', () => {
         modal.classList.remove('active');
         document.body.style.overflow = '';
         document.getElementById('modalMediaContainer').innerHTML = '';
+        modalZoom = 1;
+        modalPanX = 0;
+        modalPanY = 0;
+        isModalPanning = false;
+        suppressNextModalStageClose = false;
     };
 
     document.getElementById('modal').addEventListener('click', (e) => {
-        if (e.target.id === 'modal' || e.target.id === 'modalMediaContainer') {
+        if (e.target.id === 'modalZoomStage' && suppressNextModalStageClose) {
+            suppressNextModalStageClose = false;
+            return;
+        }
+        if (e.target.id === 'modal' || e.target.id === 'modalMediaContainer' || e.target.id === 'modalZoomStage') {
             closeModal();
         }
     });
+
+    window.switchMetadataView = (view) => {
+        const showWorkflow = view === 'workflow';
+        const metadataSections = document.querySelectorAll('#metadataPanel .metadata-section:not(.workflow-section)');
+        const workflowSection = document.getElementById('workflowNodesView');
+        const metadataBtn = document.getElementById('metadataViewBtn');
+        const workflowBtn = document.getElementById('workflowViewBtn');
+
+        metadataSections.forEach((section) => {
+            section.style.display = showWorkflow ? 'none' : '';
+        });
+        if (workflowSection) {
+            workflowSection.style.display = showWorkflow ? '' : 'none';
+        }
+        if (metadataBtn) metadataBtn.classList.toggle('active', !showWorkflow);
+        if (workflowBtn) workflowBtn.classList.toggle('active', showWorkflow);
+    };
+
+    function renderWorkflowNodes(workflowNodes) {
+        const container = document.getElementById('workflowNodesSection');
+        if (!container) return;
+
+        if (!Array.isArray(workflowNodes) || workflowNodes.length === 0) {
+            container.innerHTML = '<p class="workflow-empty">No workflow node data found in this file.</p>';
+            return;
+        }
+
+        let html = '';
+        workflowNodes.forEach((node) => {
+            const nodeType = escapeHtml(node.type || 'Unknown');
+            const nodeId = escapeHtml(node.id || 'N/A');
+            const params = Array.isArray(node.params) ? node.params : [];
+
+            let paramsHtml = '';
+            if (params.length === 0) {
+                paramsHtml = '<li><span class="workflow-param-value">No parameters</span></li>';
+            } else {
+                params.forEach((param) => {
+                    const paramName = escapeHtml(param.name || 'param');
+                    const paramValue = escapeHtml(String(param.value ?? ''));
+                    paramsHtml += `<li><span class="workflow-param-name">${paramName}</span><span class="workflow-param-value">${paramValue}</span></li>`;
+                });
+            }
+
+            html += `
+                <div class="workflow-node-item">
+                    <div class="workflow-node-header">${nodeType}<span class="workflow-node-meta">ID: ${nodeId}</span></div>
+                    <ul class="workflow-node-params">${paramsHtml}</ul>
+                </div>
+            `;
+        });
+
+        container.innerHTML = html;
+    }
 
     function displayMetadata(data) {
         const { parsed, dimensions } = data;
@@ -768,7 +1017,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (parsed.prompt) {
                 promptsHtml += `
                     <div class="metadata-item">
-                        <div class="metadata-label">Positive Prompt</div>
+                        <div class="metadata-label-row">
+                            <div class="metadata-label">Positive Prompt</div>
+                            <button class="metadata-copy-btn" type="button" data-prompt-kind="positive">Copy</button>
+                        </div>
                         <div class="metadata-prompt">${escapeHtml(parsed.prompt)}</div>
                     </div>
                 `;
@@ -776,7 +1028,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (parsed.negative_prompt) {
                 promptsHtml += `
                     <div class="metadata-item">
-                        <div class="metadata-label">Negative Prompt</div>
+                        <div class="metadata-label-row">
+                            <div class="metadata-label">Negative Prompt</div>
+                            <button class="metadata-copy-btn" type="button" data-prompt-kind="negative">Copy</button>
+                        </div>
                         <div class="metadata-prompt">${escapeHtml(parsed.negative_prompt)}</div>
                     </div>
                 `;
@@ -785,6 +1040,16 @@ document.addEventListener('DOMContentLoaded', () => {
             promptsHtml = '<p style="color: #888; margin: 0;">No prompts found.</p>';
         }
         document.getElementById('promptsSection').innerHTML = promptsHtml;
+
+        document.querySelectorAll('#promptsSection .metadata-copy-btn').forEach((btn) => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const promptKind = btn.dataset.promptKind;
+                const promptText = promptKind === 'negative' ? parsed.negative_prompt : parsed.prompt;
+                const promptLabel = promptKind === 'negative' ? 'Negative prompt' : 'Positive prompt';
+                await copyPromptToClipboard(promptText, promptLabel);
+            });
+        });
 
         let settingsHtml = '<div class="settings-grid">';
 
@@ -828,41 +1093,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         document.getElementById('lorasSection').innerHTML = lorasHtml;
 
-        const extra = data.extra || {};
-        const raw = data.raw || {};
-        const seenKeys = new Set();
-        const entries = [];
-
-        Object.keys(extra).forEach(key => {
-            entries.push([key, extra[key]]);
-            seenKeys.add(key);
-        });
-
-        Object.keys(raw).forEach(key => {
-            if (!seenKeys.has(key)) {
-                entries.push([key, raw[key]]);
-            }
-        });
-
-        entries.sort((a, b) => a[0].localeCompare(b[0]));
-
-        let otherHtml = '';
-        if (entries.length > 0) {
-            entries.forEach(([key, value]) => {
-                const safeKey = escapeHtml(key);
-                const safeVal = escapeHtml(String(value ?? ''));
-                otherHtml += `
-                    <div class="metadata-kv">
-                        <div class="label">${safeKey}</div>
-                        <div class="value">${safeVal}</div>
-                    </div>
-                `;
-            });
-        } else {
-            otherHtml = '<p style="color: #888; margin: 0;">No additional metadata found.</p>';
-        }
-        const otherEl = document.getElementById('otherMetaSection');
-        if (otherEl) otherEl.innerHTML = otherHtml;
+        renderWorkflowNodes(data.workflow_nodes || []);
     }
 
     window.toggleSection = (header) => {
@@ -876,7 +1107,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         await toggleFavorite(imageData.path, imageData.folder_id, card, favBtn);
 
-        const modalBtn = document.querySelector('.modal-action-btn.favorite, .modal-action-btn:not(.favorite)');
+        const modalBtn = document.getElementById('modalFavoriteBtn');
         const isFavorite = card?.classList.contains('favorited');
         if (modalBtn) {
             modalBtn.className = `modal-action-btn ${isFavorite ? 'favorite' : ''}`;
@@ -1143,6 +1374,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 navigatePrev();
             } else if (e.key === 'ArrowRight') {
                 navigateNext();
+            }
+        } else if (isModalOpen && (e.key === '+' || e.key === '=')) {
+            if (getModalImageElement()) {
+                e.preventDefault();
+                setModalZoom(modalZoom + MODAL_ZOOM_STEP);
+            }
+        } else if (isModalOpen && (e.key === '-' || e.key === '_')) {
+            if (getModalImageElement()) {
+                e.preventDefault();
+                setModalZoom(modalZoom - MODAL_ZOOM_STEP);
+            }
+        } else if (isModalOpen && e.key === '0') {
+            if (getModalImageElement()) {
+                e.preventDefault();
+                resetModalZoom();
             }
         }
     });

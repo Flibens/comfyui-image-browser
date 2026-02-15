@@ -91,8 +91,14 @@
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); z-index: 1000; }
         .modal.active { display: flex; align-items: center; justify-content: center; }
         .modal-content { display: flex; width: 100%; height: 100%; background: transparent; }
-        .modal-left { flex: 1; display: flex; align-items: center; justify-content: center; background: transparent; padding: 2rem; padding-right: 0; }
+        .modal-left { flex: 1; display: flex; align-items: center; justify-content: center; background: transparent; padding: 2rem; padding-right: 0; position: relative; overflow: hidden; }
         .modal-left img, .modal-left video { max-width: 100%; max-height: 100%; display: block; object-fit: contain; }
+        .modal-zoom-stage { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+        .modal-zoom-stage img { transform-origin: center center; transition: transform 0.12s ease; user-select: none; -webkit-user-drag: none; }
+        .modal-zoom-controls { position: absolute; top: 2.5rem; left: 2.5rem; z-index: 1002; display: flex; align-items: center; gap: 0.45rem; background: rgba(0, 0, 0, 0.65); border: 1px solid rgba(255, 255, 255, 0.25); border-radius: 6px; padding: 0.35rem; backdrop-filter: blur(4px); }
+        .modal-zoom-btn { width: 30px; height: 30px; border: 1px solid #4a4a4a; border-radius: 4px; padding: 0; font-size: 1rem; line-height: 1; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 30px; }
+        .modal-zoom-btn-reset { width: 64px; flex: 0 0 64px; font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+        .modal-zoom-btn-reset #modalZoomLevel { display: inline-block; width: 100%; text-align: center; white-space: nowrap; }
         .modal-right { width: 380px; padding: 0; overflow-y: auto; background: #1e1e1e; display: flex; flex-direction: column; height: 100%; }
         .modal-close { position: absolute; top: 2.5rem; right: 420px; color: #fff; font-size: 1.5rem; cursor: pointer; z-index: 1001; background: rgba(0,0,0,0.7); width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; border-radius: 4px; transition: background 0.2s; }
         .modal-close:hover { background: rgba(0,0,0,0.9); }
@@ -107,6 +113,10 @@
         .modal-action-btn.favorite { background: transparent; color: #ffd700; border-color: #ffd700; }
         .modal-action-btn.favorite:hover { background: rgba(255, 215, 0, 0.1); }
         .modal-action-btn span { font-size: 1rem; }
+        .modal-view-toggle { margin-top: 0.75rem; display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+        .modal-view-btn { background: #2a2a2a; color: #b8d9ff; border: 1px solid #3a3a3a; padding: 0.55rem 0.6rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; font-weight: 600; }
+        .modal-view-btn:hover { background: #303030; }
+        .modal-view-btn.active { background: #4a9eff; border-color: #4a9eff; color: #fff; }
 
         .metadata-section { border-bottom: 1px solid #2a2a2a; }
         .metadata-section-header { padding: 0.9rem 1rem; background: transparent; display: flex; align-items: center; gap: 0.6rem; font-size: 0.85rem; font-weight: 600; color: #4a9eff; cursor: default; user-select: none; }
@@ -116,6 +126,10 @@
         .metadata-item { margin-bottom: 1rem; }
         .metadata-item:last-child { margin-bottom: 0; }
         .metadata-label { font-size: 0.7rem; color: #888; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 0.4rem; font-weight: 600; }
+        .metadata-label-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.4rem; }
+        .metadata-label-row .metadata-label { margin-bottom: 0; }
+        .metadata-copy-btn { background: #2f2f2f; color: #b8d9ff; border: 1px solid #3a3a3a; padding: 0.2rem 0.55rem; border-radius: 4px; cursor: pointer; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+        .metadata-copy-btn:hover { background: #353535; border-color: #4a9eff; color: #fff; }
         .metadata-value { color: #e0e0e0; font-size: 0.875rem; word-wrap: break-word; line-height: 1.5; }
         .metadata-prompt { background: #252525; padding: 0.85rem; border-radius: 4px; font-size: 0.82rem; line-height: 1.65; max-height: 250px; overflow-y: auto; border: 1px solid #2a2a2a; color: #d0d0d0; }
         .metadata-kv { background: #252525; padding: 0.75rem; border-radius: 4px; margin-bottom: 0.6rem; border: 1px solid #2a2a2a; }
@@ -141,6 +155,15 @@
 
         .modal-delete-btn { background: #dc3545; border: none; color: #fff; padding: 1rem; width: 100%; cursor: pointer; font-size: 0.875rem; font-weight: 600; transition: background 0.2s; margin-top: auto; }
         .modal-delete-btn:hover { background: #c82333; }
+        .workflow-node-item { background: #252525; border: 1px solid #2f2f2f; border-radius: 6px; margin-bottom: 0.75rem; overflow: hidden; }
+        .workflow-node-header { background: #323232; padding: 0.65rem 0.75rem; font-size: 0.82rem; font-weight: 700; color: #9ed0ff; border-bottom: 1px solid #3a3a3a; }
+        .workflow-node-meta { color: #9c9c9c; font-weight: 500; margin-left: 0.45rem; font-size: 0.72rem; }
+        .workflow-node-params { list-style: none; padding: 0.7rem 0.75rem; margin: 0; }
+        .workflow-node-params li { margin-bottom: 0.5rem; font-size: 0.82rem; line-height: 1.5; color: #d6d6d6; }
+        .workflow-node-params li:last-child { margin-bottom: 0; }
+        .workflow-param-name { color: #a6a6a6; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; margin-right: 0.45rem; }
+        .workflow-param-value { color: #ececec; white-space: pre-wrap; word-break: break-word; }
+        .workflow-empty { color: #8d8d8d; margin: 0; font-size: 0.88rem; }
 
         .modal-nav { position: fixed; top: 50%; transform: translateY(-50%); background: rgba(0, 0, 0, 0.7); color: #fff; border: 2px solid #fff; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; z-index: 1001; transition: background 0.2s; }
         .modal-nav:hover { background: rgba(74, 158, 255, 0.9); }
@@ -544,6 +567,21 @@
             color: #8a2b21;
             border-color: #8a2b21;
         }
+        body[data-theme="nier"] .modal-view-btn {
+            background: #b8ae9a;
+            color: #2a241b;
+            border-color: #8a7a5f;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        body[data-theme="nier"] .modal-view-btn:hover {
+            background: #a99f8a;
+        }
+        body[data-theme="nier"] .modal-view-btn.active {
+            background: #cbb784;
+            border-color: #eadbb7;
+            color: #1a1712;
+        }
 
         body[data-theme="nier"] .metadata-section {
             border-bottom-color: #8a7a5f;
@@ -587,9 +625,25 @@
         body[data-theme="nier"] .metadata-kv,
         body[data-theme="nier"] .lora-item,
         body[data-theme="nier"] .file-info-item,
-        body[data-theme="nier"] .settings-grid .metadata-item {
+        body[data-theme="nier"] .settings-grid .metadata-item,
+        body[data-theme="nier"] .workflow-node-item {
             background: #ded4c0;
             border-color: #8a7a5f;
+        }
+        body[data-theme="nier"] .workflow-node-header {
+            background: #b8ae9a;
+            color: #2a241b;
+            border-bottom: 1px solid #8a7a5f;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        body[data-theme="nier"] .workflow-node-meta,
+        body[data-theme="nier"] .workflow-param-name,
+        body[data-theme="nier"] .workflow-empty {
+            color: #5a503f;
+        }
+        body[data-theme="nier"] .workflow-param-value {
+            color: #2a241b;
         }
 
         body[data-theme="nier"] .lora-name {

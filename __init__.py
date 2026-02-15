@@ -5,6 +5,8 @@ ComfyUI Gemini Image Browser - Fixed Metadata Version
 import os
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from aiohttp import web
 import server
@@ -100,6 +102,142 @@ def extract_metadata(image_path):
     except Exception as e:
         print(f"Error extracting metadata from {image_path}: {e}")
         return {}
+
+def _validate_and_get_workflow(json_string):
+    try:
+        data = json.loads(json_string)
+        workflow_data = data.get('workflow', data.get('prompt', data))
+
+        if isinstance(workflow_data, dict):
+            if 'nodes' in workflow_data:
+                return workflow_data, 'ui'
+
+            is_api = False
+            for _, value in workflow_data.items():
+                if isinstance(value, dict) and 'class_type' in value:
+                    is_api = True
+                    break
+            if is_api:
+                return workflow_data, 'api'
+    except Exception:
+        pass
+    return None, None
+
+def _scan_bytes_for_workflow(content_bytes):
+    """
+    Yield valid JSON object strings found in a binary stream by brace matching.
+    """
+    try:
+        stream_str = content_bytes.decode('utf-8', errors='ignore')
+    except Exception:
+        return
+
+    start_pos = 0
+    while True:
+        first_brace = stream_str.find('{', start_pos)
+        if first_brace == -1:
+            break
+
+        open_braces = 0
+        start_index = first_brace
+
+        for i in range(start_index, len(stream_str)):
+            char = stream_str[i]
+            if char == '{':
+                open_braces += 1
+            elif char == '}':
+                open_braces -= 1
+
+            if open_braces == 0:
+                candidate = stream_str[start_index:i + 1]
+                try:
+                    json.loads(candidate)
+                    yield candidate
+                except Exception:
+                    pass
+                start_pos = i + 1
+                break
+        else:
+            break
+
+def extract_workflow_from_file(file_path):
+    """
+    Extract workflow payload from image/video/audio files.
+    Returns (workflow_dict_or_none, 'ui'|'api'|None).
+    """
+    found = {}
+
+    def analyze_json(json_str):
+        wf, wf_type = _validate_and_get_workflow(json_str)
+        if wf and wf_type and wf_type not in found:
+            found[wf_type] = wf
+
+    ext_lower = str(file_path).lower()
+    is_media = ext_lower.endswith(('.mp4', '.mkv', '.webm', '.mov', '.avi', '.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac'))
+
+    # Video/audio metadata tags via ffprobe (primary path for many encoded files)
+    if is_media:
+        ffprobe_bin = os.environ.get('FFPROBE_PATH') or shutil.which('ffprobe')
+        if ffprobe_bin:
+            try:
+                cmd = [ffprobe_bin, '-v', 'quiet', '-print_format', 'json', '-show_format', str(file_path)]
+                creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='ignore',
+                    check=True,
+                    creationflags=creationflags
+                )
+                ff_data = json.loads(result.stdout)
+                tags = ff_data.get('format', {}).get('tags', {})
+                if isinstance(tags, dict):
+                    for value in tags.values():
+                        if not isinstance(value, str):
+                            continue
+                        if value.strip().startswith('{'):
+                            analyze_json(value)
+                        elif '{' in value:
+                            for json_str in _scan_bytes_for_workflow(value.encode('utf-8', errors='ignore')):
+                                analyze_json(json_str)
+            except Exception:
+                pass
+
+    # Fast image metadata path (PNG/JPG/WEBP text chunks, EXIF)
+    if Image:
+        try:
+            with Image.open(file_path) as img:
+                for key in ['workflow', 'prompt']:
+                    value = img.info.get(key)
+                    if isinstance(value, str) and value.strip().startswith('{'):
+                        analyze_json(value)
+
+                exif_data = img.info.get('exif')
+                if isinstance(exif_data, bytes):
+                    for json_str in _scan_bytes_for_workflow(exif_data):
+                        analyze_json(json_str)
+        except Exception:
+            pass
+
+    # Ultimate fallback: scan raw bytes (works for video/audio metadata blobs too)
+    if not found:
+        try:
+            with open(file_path, 'rb') as f:
+                content = f.read()
+            for json_str in _scan_bytes_for_workflow(content):
+                analyze_json(json_str)
+                if 'ui' in found and 'api' in found:
+                    break
+        except Exception:
+            pass
+
+    if 'ui' in found:
+        return found['ui'], 'ui'
+    if 'api' in found:
+        return found['api'], 'api'
+    return None, None
 
 def _parse_parameters_text(params_text, parsed):
     if not params_text or not isinstance(params_text, str):
@@ -365,6 +503,81 @@ def flatten_metadata(metadata):
             flat[key] = _safe_str(value)
     return flat
 
+def _normalize_node_params_from_ui_node(node):
+    params = []
+
+    inputs = node.get('inputs', {})
+    if isinstance(inputs, list):
+        for idx, item in enumerate(inputs):
+            if isinstance(item, dict):
+                name = item.get('name') or f"input_{idx + 1}"
+                value = item.get('widget', item.get('value', item.get('link')))
+                params.append({'name': str(name), 'value': _safe_str(value)})
+    elif isinstance(inputs, dict):
+        for name, value in inputs.items():
+            params.append({'name': str(name), 'value': _safe_str(value)})
+
+    widgets = node.get('widgets_values', [])
+    if isinstance(widgets, list):
+        for idx, value in enumerate(widgets):
+            params.append({'name': f"widget_{idx + 1}", 'value': _safe_str(value)})
+
+    return params
+
+def extract_workflow_nodes(metadata):
+    """Extract workflow nodes for sidebar node inspector (UI and API workflow formats)."""
+    workflow_data = metadata.get('workflow')
+    prompt_data = metadata.get('prompt')
+    source = workflow_data if workflow_data is not None else prompt_data
+
+    if isinstance(source, str):
+        try:
+            source = json.loads(source)
+        except Exception:
+            return []
+
+    nodes_out = []
+
+    # UI format: {"nodes":[...]}
+    if isinstance(source, dict) and isinstance(source.get('nodes'), list):
+        for node in source.get('nodes', []):
+            if not isinstance(node, dict):
+                continue
+            if node.get('mode', 0) != 0:
+                continue
+            node_id = node.get('id', 'N/A')
+            node_type = node.get('type') or node.get('class_type') or 'Unknown'
+            nodes_out.append({
+                'id': _safe_str(node_id),
+                'type': _safe_str(node_type),
+                'params': _normalize_node_params_from_ui_node(node)
+            })
+    # API format: {"3":{"class_type":"KSampler","inputs":{...}}, ...}
+    elif isinstance(source, dict):
+        for node_id, node in source.items():
+            if not isinstance(node, dict) or 'class_type' not in node:
+                continue
+            params = []
+            inputs = node.get('inputs', {})
+            if isinstance(inputs, dict):
+                for name, value in inputs.items():
+                    params.append({'name': str(name), 'value': _safe_str(value)})
+            nodes_out.append({
+                'id': _safe_str(node_id),
+                'type': _safe_str(node.get('class_type', 'Unknown')),
+                'params': params
+            })
+
+    def _sort_key(item):
+        node_id = item.get('id', '')
+        try:
+            return (0, int(node_id))
+        except Exception:
+            return (1, str(node_id))
+
+    nodes_out.sort(key=_sort_key)
+    return nodes_out
+
 # --- API Endpoints ---
 @server.PromptServer.instance.routes.get("/gemini-image-browser/list")
 async def list_images(request):
@@ -480,31 +693,25 @@ async def get_metadata_endpoint(request):
         # Check if it's an audio file
         is_audio = file_path.suffix.lower() in ['.mp3', '.wav', '.ogg', '.flac', '.m4a']
         
-        if is_video or is_audio:
-            return web.json_response({
-                'parsed': {
-                    'prompt': None, 'negative_prompt': None, 'seed': None,
-                    'steps': None, 'cfg': None, 'sampler': None,
-                    'scheduler': None, 'model': None, 'loras': [],
-                    'width': None, 'height': None
-                },
-                'raw': {},
-                'dimensions': {'width': 'N/A', 'height': 'N/A'},
-                'file_info': {'size': file_path.stat().st_size, 'modified': file_path.stat().st_mtime},
-                'is_favorite': f"{folder_id}:{filename}" in load_json(FAVORITES_FILE),
-                'is_video': is_video,
-                'is_audio': is_audio
-            })
-        
-        # Extract raw metadata
-        raw_metadata = extract_metadata(file_path)
+        # Extract metadata for images, and workflow payload for video/audio
+        raw_metadata = {}
+        if not is_video and not is_audio:
+            raw_metadata = extract_metadata(file_path)
+
+        workflow_obj, workflow_type = extract_workflow_from_file(file_path)
+        if workflow_obj:
+            if workflow_type == 'ui':
+                raw_metadata['workflow'] = workflow_obj
+            else:
+                raw_metadata['prompt'] = workflow_obj
         
         # Parse metadata
         parsed_metadata = parse_comfy_metadata(raw_metadata)
+        workflow_nodes = extract_workflow_nodes(raw_metadata)
         
-        # Get image dimensions
+        # Get media dimensions
         dimensions = {}
-        if Image:
+        if not is_video and not is_audio and Image:
             try:
                 with Image.open(file_path) as img:
                     dimensions = {'width': img.width, 'height': img.height}
@@ -549,13 +756,15 @@ async def get_metadata_endpoint(request):
             'raw': {k: (v[:500] + "…") if len(v) > 500 else v
                     for k, v in flatten_metadata(raw_metadata).items()},
             'extra': parsed_metadata.get('extras', {}),
+            'workflow_nodes': workflow_nodes,
             'dimensions': dimensions,
             'file_info': {
                 'size': file_path.stat().st_size, 
                 'modified': file_path.stat().st_mtime
             },
             'is_favorite': f"{folder_id}:{filename}" in load_json(FAVORITES_FILE),
-            'is_video': False
+            'is_video': is_video,
+            'is_audio': is_audio
         })
         
     except Exception as e:
