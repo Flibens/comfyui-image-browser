@@ -246,19 +246,36 @@ def _parse_parameters_text(params_text, parsed):
     if not text:
         return
 
-    # Positive prompt
-    pos_match = re.search(r'(?:^|\n)Positive prompt:\s*(.+?)(?=\n(?:Negative prompt:|Steps:|Seed:|Sampler:|CFG|Size:|Model:|$))', text, re.DOTALL)
+    # Positive prompt (explicit label, if present)
+    pos_match = re.search(
+        r'(?:^|\n)Positive prompt:\s*(.+?)(?=\n(?:Negative prompt:|Steps:|Seed:|Sampler:|CFG(?: scale)?:|CfgScale:|Size:|Model:|Scheduler:|$))',
+        text,
+        re.DOTALL,
+    )
     if pos_match and not parsed['prompt']:
         parsed['prompt'] = pos_match.group(1).strip()
 
-    # Fallback: first line as prompt if it doesn't look like a param line
+    # Fallback: extract unlabeled positive prompt block (common in A1111/Forge parameters)
     if not parsed['prompt']:
-        first_line = text.split('\n', 1)[0].strip()
-        if first_line and not re.search(r'^(Steps:|Seed:|Sampler:|CFG|Size:|Model:)', first_line):
-            parsed['prompt'] = first_line
+        marker_match = re.search(
+            r'(?m)^\s*(Negative prompt:|Steps:|Seed:|Sampler:|CFG(?: scale)?:|CfgScale:|Size:|Model:|Scheduler:)',
+            text,
+        )
+        prompt_block = text[:marker_match.start()] if marker_match else text
+        prompt_block = prompt_block.strip()
+        first_line = prompt_block.split('\n', 1)[0].strip() if prompt_block else ''
+        if prompt_block and not re.search(
+            r'^(Steps:|Seed:|Sampler:|CFG(?: scale)?:|CfgScale:|Size:|Model:|Scheduler:)',
+            first_line,
+        ):
+            parsed['prompt'] = prompt_block
 
     # Negative prompt
-    neg_match = re.search(r'(?:^|\n)Negative prompt:\s*(.+?)(?=\n(?:Steps:|Seed:|Sampler:|CFG|Size:|Model:|$))', text, re.DOTALL)
+    neg_match = re.search(
+        r'(?:^|\n)Negative prompt:\s*(.+?)(?=\n(?:Steps:|Seed:|Sampler:|CFG(?: scale)?:|CfgScale:|Size:|Model:|Scheduler:|$))',
+        text,
+        re.DOTALL,
+    )
     if neg_match and not parsed['negative_prompt']:
         parsed['negative_prompt'] = neg_match.group(1).strip()
 
@@ -313,8 +330,8 @@ def _parse_parameters_text(params_text, parsed):
             parsed['extras'][label] = m.group(1).strip()
 
     # Extract LoRAs from prompt text
-    if parsed['prompt']:
-        lora_tags = re.findall(r'<lora:([^:>]+):([\d.]+)>', parsed['prompt'])
+    if text:
+        lora_tags = re.findall(r'<lora:([^:>]+):([\d.]+)>', text)
         for lora_name, strength in lora_tags:
             lora_name = lora_name.strip()
             if lora_name and lora_name not in ['None', '', 'ComfyUI']:
@@ -324,6 +341,21 @@ def _parse_parameters_text(params_text, parsed):
                         'strength_model': float(strength),
                         'strength_clip': float(strength)
                     })
+
+def _sanitize_prompt_text(prompt_text):
+    """Remove inline LoRA tags from display prompt while preserving line structure."""
+    if not isinstance(prompt_text, str):
+        return prompt_text
+
+    cleaned = re.sub(r'[ \t]*<lora:[^>]+>[ \t]*', ' ', prompt_text, flags=re.IGNORECASE)
+    out_lines = []
+    for line in cleaned.splitlines():
+        line = re.sub(r'[ \t]+', ' ', line).strip()
+        line = re.sub(r'\s+,', ',', line)
+        line = re.sub(r',\s*,', ',', line)
+        if line:
+            out_lines.append(line)
+    return '\n'.join(out_lines).strip()
 
 def parse_comfy_metadata(metadata):
     """Parse ComfyUI/SD metadata with broad heuristics"""
@@ -344,8 +376,25 @@ def parse_comfy_metadata(metadata):
     
     try:
         # Try any known text-like fields first
-        for key in ['parameters', 'Comment', 'Description', 'UserComment', 'ImageDescription', 'Software', 'Prompt', 'prompt', 'notes']:
+        negative_prompt_keys = {'Negative prompt', 'negative_prompt', 'negativePrompt'}
+        for key in [
+            'parameters',
+            'Comment',
+            'Description',
+            'UserComment',
+            'ImageDescription',
+            'Software',
+            'Prompt',
+            'prompt',
+            'Negative prompt',
+            'negative_prompt',
+            'negativePrompt',
+            'notes',
+        ]:
             if key in metadata and isinstance(metadata[key], str):
+                if key in negative_prompt_keys and not parsed['negative_prompt']:
+                    parsed['negative_prompt'] = metadata[key].strip()
+                    continue
                 _parse_parameters_text(metadata[key], parsed)
 
         # If there is EXIF, scan for prompt-like text
@@ -475,20 +524,98 @@ def parse_comfy_metadata(metadata):
                         if not parsed['height']:
                             parsed['height'] = widgets[1] if len(widgets) > 1 else inputs.get('height')
 
-        # Try to parse raw prompt JSON (if prompt is a dict)
-        if isinstance(metadata.get('prompt'), dict) and not parsed['prompt']:
-            for node_id, node in metadata['prompt'].items():
-                inputs = node.get('inputs', {})
-                text = inputs.get('text')
-                if isinstance(text, str) and text.strip():
-                    parsed['prompt'] = text.strip()
+        # Parse API prompt graph JSON (ComfyUI default Save Image metadata)
+        if isinstance(metadata.get('prompt'), dict) and (not parsed['prompt'] or not parsed['negative_prompt']):
+            prompt_graph = metadata['prompt']
+
+            def _linked_text(link_ref):
+                if not isinstance(link_ref, (list, tuple)) or len(link_ref) == 0:
+                    return None
+                node_key = str(link_ref[0])
+                ref_node = prompt_graph.get(node_key)
+                if not isinstance(ref_node, dict):
+                    return None
+                ref_inputs = ref_node.get('inputs', {})
+                if not isinstance(ref_inputs, dict):
+                    return None
+                ref_text = ref_inputs.get('text')
+                if isinstance(ref_text, str) and ref_text.strip():
+                    return ref_text.strip()
+                return None
+
+            # Preferred path: resolve positive/negative links from KSampler-like nodes
+            for _, node in prompt_graph.items():
+                if not isinstance(node, dict):
+                    continue
+                node_type = str(node.get('class_type') or node.get('type') or '')
+                if 'KSampler' not in node_type:
+                    continue
+                node_inputs = node.get('inputs', {})
+                if not isinstance(node_inputs, dict):
+                    continue
+
+                if not parsed['prompt']:
+                    positive_text = _linked_text(node_inputs.get('positive'))
+                    if positive_text:
+                        parsed['prompt'] = positive_text
+
+                if not parsed['negative_prompt']:
+                    negative_text = _linked_text(node_inputs.get('negative'))
+                    if negative_text:
+                        parsed['negative_prompt'] = negative_text
+
+                if parsed['prompt'] and parsed['negative_prompt']:
                     break
+
+            # Fallback: scan CLIP text nodes if links were unavailable
+            if not parsed['prompt'] or not parsed['negative_prompt']:
+                clip_nodes = []
+                for _, node in prompt_graph.items():
+                    if not isinstance(node, dict):
+                        continue
+                    node_type = str(node.get('class_type') or node.get('type') or '')
+                    if 'CLIPTextEncode' not in node_type:
+                        continue
+                    node_inputs = node.get('inputs', {})
+                    if not isinstance(node_inputs, dict):
+                        continue
+                    text = node_inputs.get('text')
+                    if not (isinstance(text, str) and text.strip()):
+                        continue
+                    title = str((node.get('_meta') or {}).get('title', '')).lower()
+                    clip_nodes.append((text.strip(), title))
+
+                if not parsed['negative_prompt']:
+                    for text, title in clip_nodes:
+                        if any(word in title for word in ['negative', 'neg']):
+                            parsed['negative_prompt'] = text
+                            break
+
+                if not parsed['prompt'] and clip_nodes:
+                    for text, title in clip_nodes:
+                        if not any(word in title for word in ['negative', 'neg']):
+                            parsed['prompt'] = text
+                            break
+
+                # Last resort: if one side is still missing, use the remaining distinct CLIP text
+                if clip_nodes and (not parsed['prompt'] or not parsed['negative_prompt']):
+                    for text, _ in clip_nodes:
+                        if not parsed['prompt']:
+                            parsed['prompt'] = text
+                            continue
+                        if not parsed['negative_prompt'] and text != parsed['prompt']:
+                            parsed['negative_prompt'] = text
+                            break
     
     except Exception as e:
         print(f"Error parsing metadata: {e}")
         import traceback
         traceback.print_exc()
-    
+
+    # Final normalization: prompt display should not duplicate LoRA entries.
+    parsed['prompt'] = _sanitize_prompt_text(parsed.get('prompt'))
+    parsed['negative_prompt'] = _sanitize_prompt_text(parsed.get('negative_prompt'))
+
     return parsed
 
 def flatten_metadata(metadata):
