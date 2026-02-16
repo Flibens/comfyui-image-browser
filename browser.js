@@ -281,8 +281,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         switch (action) {
             case 'open':
-                const index = parseInt(card.dataset.index);
-                openModal(index);
+                const index = parseInt(card.dataset.index, 10);
+                if (!Number.isNaN(index)) {
+                    openModal(index);
+                }
                 break;
 
             case 'copy-image':
@@ -382,6 +384,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (data.success) {
                 card.remove();
+                removeImageFromState(imageData);
                 showNotification('Image deleted');
             } else {
                 throw new Error(data.error || 'Delete failed');
@@ -395,8 +398,10 @@ document.addEventListener('DOMContentLoaded', () => {
     async function deleteSelectedImages() {
         if (!confirm(`Delete ${selectedImages.length} selected images?`)) return;
 
+        const totalToDelete = selectedImages.length;
+        const imagesToDelete = [...selectedImages];
         let successCount = 0;
-        for (const imageData of selectedImages) {
+        for (const imageData of imagesToDelete) {
             try {
                 const response = await fetch('/gemini-image-browser/delete', {
                     method: 'POST',
@@ -411,6 +416,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (data.success) {
                     const card = document.querySelector(`[data-filename="${imageData.path}"][data-folder-id="${imageData.folder_id}"]`);
                     if (card) card.remove();
+                    removeImageFromState(imageData);
                     successCount++;
                 }
             } catch (error) {
@@ -419,7 +425,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         clearSelection();
-        showNotification(`Deleted ${successCount} of ${selectedImages.length} images`);
+        showNotification(`Deleted ${successCount} of ${totalToDelete} images`);
     }
 
     async function favoriteSelectedImages(addToFavorites) {
@@ -450,6 +456,60 @@ document.addEventListener('DOMContentLoaded', () => {
             notification.classList.remove('show');
             setTimeout(() => notification.remove(), 300);
         }, 2000);
+    }
+
+    function isSameImage(a, b) {
+        return a.path === b.path && a.folder_id === b.folder_id;
+    }
+
+    function getImageKey(path, folderId) {
+        return `${folderId}::${path}`;
+    }
+
+    function rebuildGalleryIndexes() {
+        const indexByKey = new Map(
+            currentImages.map((img, index) => [getImageKey(img.path, img.folder_id), index])
+        );
+
+        document.querySelectorAll('.image-card').forEach((card) => {
+            const key = getImageKey(card.dataset.filename, card.dataset.folderId);
+            const index = indexByKey.get(key);
+            if (typeof index === 'number') {
+                card.dataset.index = index;
+            } else {
+                card.removeAttribute('data-index');
+            }
+        });
+    }
+
+    function removeImageFromState(imageData) {
+        const removedIndex = currentImages.findIndex((img) => isSameImage(img, imageData));
+        if (removedIndex === -1) return;
+
+        currentImages.splice(removedIndex, 1);
+
+        if (currentImageIndex > removedIndex) {
+            currentImageIndex--;
+        } else if (currentImageIndex >= currentImages.length) {
+            currentImageIndex = currentImages.length - 1;
+        }
+
+        selectedImages = selectedImages.filter((img) => !isSameImage(img, imageData));
+        selectedForCompare = selectedForCompare.filter((img) => !isSameImage(img, imageData));
+
+        updateMultiSelectActions();
+        compareBtn.style.display = selectedForCompare.length === 2 ? 'block' : 'none';
+
+        if (selectedForCompare.length === 1) {
+            const remaining = selectedForCompare[0];
+            const remainingCard = document.querySelector(`[data-filename="${remaining.path}"][data-folder-id="${remaining.folder_id}"]`);
+            if (remainingCard) {
+                remainingCard.classList.remove('compare-second');
+                remainingCard.classList.add('compare-first');
+            }
+        }
+
+        rebuildGalleryIndexes();
     }
 
     function toggleImageSelection(imageData, card, event) {
@@ -562,12 +622,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 const mediaEl = document.createElement('div');
                 mediaEl.innerHTML = mediaHtml;
                 mediaEl.onclick = (e) => {
+                    const cardIndex = parseInt(card.dataset.index, 10);
+                    if (Number.isNaN(cardIndex)) return;
+
                     if (e.ctrlKey || e.metaKey) {
                         toggleImageSelection(img, card, e);
                     } else if (isCompareMode) {
-                        toggleCompareSelection(globalIndex, card);
+                        toggleCompareSelection(cardIndex, card);
                     } else {
-                        openModal(globalIndex);
+                        openModal(cardIndex);
                     }
                 };
 
@@ -1136,10 +1199,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (data.success) {
                 if (card) card.remove();
+                removeImageFromState(imageData);
                 closeModal();
                 showNotification('Image deleted');
-
-                currentImages.splice(currentImageIndex, 1);
             } else {
                 throw new Error(data.error || 'Delete failed');
             }

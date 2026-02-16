@@ -1,6 +1,9 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [1.2.0] - 2026-02-16
+- Fixed delete bug
 
 ## [1.1.0] - 2026-02-15
 - Minor refinements
