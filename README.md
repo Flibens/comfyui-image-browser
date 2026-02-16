@@ -35,7 +35,7 @@ Option 2 (git):
 ## Use :arrow_forward:
 In ComfyUI, click the **Image Browser** button in the top menu bar.
 
-##Notes: If you have problems viewing metadata, use a different save image node, i would recommend Lora Manager´s Save Image node.
+ ## Notes :arrow_forward:If you have problems viewing metadata, use a different save image node, i would recommend Lora Manager´s Save Image node.
 
 
 [![Buy Me A Coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=%E2%98%95&slug=flibens&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff)](https://www.buymeacoffee.com/flibens)
