@@ -4,9 +4,9 @@
 
 Use the latest release.
 
-Versions before `v1.3.1` do not include endpoint path-sanitization hardening and should be considered vulnerable.
+Recommendation: upgrade to `v1.3.1+` for endpoint path-sanitization hardening.
 
 ## Upgrade Guidance
 
-- Upgrade to `v1.3.1` or later.
+- Recommendation: upgrade to `v1.3.1+`.
 - If you previously used older versions, update immediately and restart ComfyUI.
