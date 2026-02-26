@@ -23,6 +23,72 @@ ADDITIONAL_FOLDERS_FILE = Path(__file__).parent / "folders.json"
 FAVORITES_FILE = Path(__file__).parent / "favorites.json"
 
 # --- Helper Functions ---
+def _is_relative_to(path_obj, base_obj):
+    try:
+        path_obj.relative_to(base_obj)
+        return True
+    except ValueError:
+        return False
+
+def _get_allowed_roots():
+    roots = []
+    for getter_name in ["get_output_directory", "get_input_directory", "get_temp_directory"]:
+        getter = getattr(folder_paths, getter_name, None)
+        if not callable(getter):
+            continue
+        try:
+            root = Path(getter()).expanduser().resolve()
+            roots.append(root)
+        except Exception:
+            continue
+    return roots
+
+def _is_under_allowed_roots(path_obj):
+    for root in _get_allowed_roots():
+        if _is_relative_to(path_obj, root):
+            return True
+    return False
+
+def _build_folder_map():
+    output_dir = Path(folder_paths.get_output_directory()).expanduser().resolve()
+    folder_map = {"default": output_dir}
+
+    for folder in load_json(ADDITIONAL_FOLDERS_FILE):
+        folder_id = folder.get("id")
+        folder_path = folder.get("path")
+        if not folder_id or not folder_path:
+            continue
+        try:
+            resolved = Path(folder_path).expanduser().resolve()
+        except Exception:
+            continue
+        if resolved.exists() and resolved.is_dir() and _is_under_allowed_roots(resolved):
+            folder_map[folder_id] = resolved
+
+    return folder_map
+
+def _resolve_folder_path(folder_id):
+    folder_map = _build_folder_map()
+    return folder_map.get(folder_id)
+
+def _resolve_file_from_request(base_dir, request_path):
+    if not isinstance(request_path, str) or not request_path.strip():
+        return None
+
+    requested = Path(request_path)
+    if requested.is_absolute() or requested.drive:
+        return None
+
+    try:
+        full_path = (base_dir / requested).resolve()
+    except Exception:
+        return None
+
+    if not _is_relative_to(full_path, base_dir):
+        return None
+
+    return full_path
+
 def load_json(file_path):
     if file_path.exists():
         try:
@@ -718,14 +784,12 @@ async def list_images(request):
         show_favorites = request.query.get('favorites', 'false') == 'true'
         print(f"Params: page={page}, sort='{sort}', search='{search}', folder='{folder_filter}', favorites={show_favorites}")
 
-        output_dir = Path(folder_paths.get_output_directory())
+        output_dir = Path(folder_paths.get_output_directory()).expanduser().resolve()
         favorites = load_json(FAVORITES_FILE)
         additional_folders = load_json(ADDITIONAL_FOLDERS_FILE)
 
         scan_targets = []
-        folder_map = {'default': output_dir}
-        for f in additional_folders:
-            folder_map[f['id']] = Path(f['path'])
+        folder_map = _build_folder_map()
         
         print(f"Folder map contains {len(folder_map)} folder(s).")
 
@@ -755,7 +819,7 @@ async def list_images(request):
             base_dir = folder_map.get(folder_id)
             if not base_dir: continue
             
-            relative_path = str(path_obj.relative_to(base_dir))
+            relative_path = str(path_obj.resolve().relative_to(base_dir))
             fav_key = f"{folder_id}:{relative_path}"
 
             if show_favorites and fav_key not in favorites: continue
@@ -784,7 +848,9 @@ async def list_images(request):
             'images': paginated_files,
             'total': len(file_info),
             'has_more': (start_index + per_page) < len(file_info),
-            'folders': [{'id': 'default', 'name': 'ComfyUI Output', 'path': str(output_dir)}] + additional_folders
+            'folders': [{'id': 'default', 'name': 'ComfyUI Output', 'path': str(output_dir)}] + [
+                f for f in additional_folders if f.get('id') in folder_map and f.get('id') != 'default'
+            ]
         })
     except Exception as e: 
         print(f"Error in list_images: {e}")
@@ -801,15 +867,13 @@ async def get_metadata_endpoint(request):
         if not filename:
             return web.json_response({'error': 'Missing filename'}, status=400)
         
-        # Determine which folder to use
-        base_dir = Path(folder_paths.get_output_directory())
-        if folder_id != 'default':
-            folders = load_json(ADDITIONAL_FOLDERS_FILE)
-            folder_data = next((f for f in folders if f['id'] == folder_id), None)
-            if folder_data:
-                base_dir = Path(folder_data['path'])
-        
-        file_path = base_dir / filename
+        base_dir = _resolve_folder_path(folder_id)
+        if not base_dir:
+            return web.json_response({'error': 'Folder not found'}, status=404)
+
+        file_path = _resolve_file_from_request(base_dir, filename)
+        if not file_path:
+            return web.json_response({'error': 'Invalid file path'}, status=400)
         
         if not file_path.exists():
             print(f"Metadata: File not found at {file_path}")
@@ -928,20 +992,12 @@ async def delete_image_endpoint(request):
         if not filename:
             return web.json_response({'error': 'Missing filename'}, status=400)
         
-        # Get the base directory
-        base_dir = Path(folder_paths.get_output_directory())
-        if folder_id != 'default':
-            folders = load_json(ADDITIONAL_FOLDERS_FILE)
-            folder_data = next((f for f in folders if f['id'] == folder_id), None)
-            if not folder_data:
-                return web.json_response({'error': 'Folder not found'}, status=404)
-            base_dir = Path(folder_data['path'])
-        
-        # Construct the full file path
-        file_path = base_dir / filename
-        
-        # Security check: ensure the file is within the allowed directory
-        if not file_path.resolve().is_relative_to(base_dir.resolve()):
+        base_dir = _resolve_folder_path(folder_id)
+        if not base_dir:
+            return web.json_response({'error': 'Folder not found'}, status=404)
+
+        file_path = _resolve_file_from_request(base_dir, filename)
+        if not file_path:
             return web.json_response({'error': 'Invalid file path'}, status=400)
         
         # Check if file exists
@@ -973,11 +1029,18 @@ async def add_folder_endpoint(request):
     path = data.get('path')
     name = data.get('name')
     if not path or not name: return web.json_response({'error': 'Missing path or name'}, status=400)
-    if not Path(path).exists(): return web.json_response({'error': 'Folder does not exist'}, status=400)
+    try:
+        normalized_path = Path(path).expanduser().resolve()
+    except Exception:
+        return web.json_response({'error': 'Invalid folder path'}, status=400)
+    if not normalized_path.exists() or not normalized_path.is_dir():
+        return web.json_response({'error': 'Folder does not exist'}, status=400)
+    if not _is_under_allowed_roots(normalized_path):
+        return web.json_response({'error': 'Folder path is not allowed'}, status=400)
     
     folders = load_json(ADDITIONAL_FOLDERS_FILE)
     folder_id = f"folder_{len(folders)}_{os.urandom(2).hex()}"
-    new_folder = {'id': folder_id, 'name': name, 'path': path}
+    new_folder = {'id': folder_id, 'name': name, 'path': str(normalized_path)}
     folders.append(new_folder)
     save_json(folders, ADDITIONAL_FOLDERS_FILE)
     return web.json_response({'success': True, 'folder': new_folder})
@@ -999,14 +1062,17 @@ async def get_thumbnail(request):
     folder_id = request.query.get('folder', 'default')
     if not filename: return web.Response(status=400)
 
-    base_dir = Path(folder_paths.get_output_directory())
-    if folder_id != 'default':
-        folders = load_json(ADDITIONAL_FOLDERS_FILE)
-        folder_data = next((f for f in folders if f['id'] == folder_id), None)
-        if not folder_data: return web.Response(status=404)
-        base_dir = Path(folder_data['path'])
+    base_dir = _resolve_folder_path(folder_id)
+    if not base_dir:
+        return web.Response(status=404)
 
-    return web.FileResponse(base_dir / filename)
+    file_path = _resolve_file_from_request(base_dir, filename)
+    if not file_path:
+        return web.Response(status=400)
+    if not file_path.exists():
+        return web.Response(status=404)
+
+    return web.FileResponse(file_path)
 
 # --- UI Routes ---
 @server.PromptServer.instance.routes.get("/gemini-image-browser/ui")
