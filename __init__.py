@@ -19,6 +19,7 @@ except ImportError:
 
 # --- Constants ---
 WEB_DIRECTORY = "./web"
+__version__ = "1.4.0"
 ADDITIONAL_FOLDERS_FILE = Path(__file__).parent / "folders.json"
 FAVORITES_FILE = Path(__file__).parent / "favorites.json"
 
@@ -1090,4 +1091,4 @@ NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
 print("--- Gemini Image Browser ---")
-print("Loaded. UI available via button in menu.")
+print(f"Loaded v{__version__}. UI available via button in menu.")

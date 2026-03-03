@@ -12,6 +12,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentImageIndex = -1;
     let selectedForCompare = [];
     let isCompareMode = false;
+    let isMultiSelectMode = false;
     let selectedImages = [];
     let contextMenu = null;
     let modalZoom = 1;
@@ -24,6 +25,19 @@ document.addEventListener('DOMContentLoaded', () => {
     let modalPanOriginY = 0;
     let suppressNextModalStageClose = false;
     let modalPanListenersBound = false;
+    let compareZoom = 1;
+    let comparePanX = 0;
+    let comparePanY = 0;
+    let isComparePanning = false;
+    let comparePanStartX = 0;
+    let comparePanStartY = 0;
+    let comparePanOriginX = 0;
+    let comparePanOriginY = 0;
+    let comparePanListenersBound = false;
+    let suppressNextCompareClick = false;
+    const COMPARE_MIN_ZOOM = 0.5;
+    const COMPARE_MAX_ZOOM = 4;
+    const COMPARE_ZOOM_STEP = 0.1;
     const MODAL_MIN_ZOOM = 0.25;
     const MODAL_MAX_ZOOM = 6;
     const MODAL_ZOOM_STEP = 0.15;
@@ -40,6 +54,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const favoritesFilterBtn = document.getElementById('favoritesFilterBtn');
     const refreshBtn = document.getElementById('refreshBtn');
     const compareModeBtn = document.getElementById('compareModeBtn');
+    const multiSelectModeBtn = document.getElementById('multiSelectModeBtn');
     const compareBtn = document.getElementById('compareBtn');
     const multiSelectActions = document.getElementById('multiSelectActions');
     const themeSelect = document.getElementById('themeSelect');
@@ -203,6 +218,57 @@ document.addEventListener('DOMContentLoaded', () => {
         modalPanX = 0;
         modalPanY = 0;
         setModalZoom(1);
+    }
+
+    function clampCompareZoom(value) {
+        return Math.min(COMPARE_MAX_ZOOM, Math.max(COMPARE_MIN_ZOOM, value));
+    }
+
+    function clampComparePan() {
+        const container = document.getElementById('compareImageContainer');
+        if (!container) return;
+
+        if (compareZoom <= 1) {
+            comparePanX = 0;
+            comparePanY = 0;
+            return;
+        }
+
+        const maxPanX = Math.max(0, (container.offsetWidth * (compareZoom - 1)) / 2);
+        const maxPanY = Math.max(0, (container.offsetHeight * (compareZoom - 1)) / 2);
+
+        comparePanX = Math.min(maxPanX, Math.max(-maxPanX, comparePanX));
+        comparePanY = Math.min(maxPanY, Math.max(-maxPanY, comparePanY));
+    }
+
+    function applyCompareZoom() {
+        const container = document.getElementById('compareImageContainer');
+        if (!container) return;
+
+        clampComparePan();
+        container.style.transform = `translate(${comparePanX}px, ${comparePanY}px) scale(${compareZoom})`;
+        container.style.cursor = isComparePanning ? 'grabbing' : (compareZoom > 1 ? 'grab' : 'default');
+
+        const zoomLabel = document.getElementById('compareZoomLevel');
+        if (zoomLabel) {
+            zoomLabel.textContent = `${Math.round(compareZoom * 100)}%`;
+        }
+    }
+
+    function setCompareZoom(nextZoom) {
+        compareZoom = clampCompareZoom(nextZoom);
+        if (compareZoom <= 1) {
+            comparePanX = 0;
+            comparePanY = 0;
+        }
+        applyCompareZoom();
+    }
+
+    function resetCompareZoom() {
+        compareZoom = 1;
+        comparePanX = 0;
+        comparePanY = 0;
+        applyCompareZoom();
     }
 
     function initModalZoomControls() {
@@ -625,10 +691,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     const cardIndex = parseInt(card.dataset.index, 10);
                     if (Number.isNaN(cardIndex)) return;
 
-                    if (e.ctrlKey || e.metaKey) {
-                        toggleImageSelection(img, card, e);
-                    } else if (isCompareMode) {
+                    if (isCompareMode) {
                         toggleCompareSelection(cardIndex, card);
+                    } else if (e.ctrlKey || e.metaKey || isMultiSelectMode) {
+                        if ((e.ctrlKey || e.metaKey) && !isMultiSelectMode) {
+                            setMultiSelectMode(true);
+                        }
+                        toggleImageSelection(img, card, e);
                     } else {
                         openModal(cardIndex);
                     }
@@ -744,7 +813,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     <div class="compare-label compare-label-left">${escapeHtml(img1.name)}</div>
                     <div class="compare-label compare-label-right">${escapeHtml(img2.name)}</div>
                 </div>
-                <div class="compare-image-container">
+                <div class="compare-zoom-controls">
+                    <button type="button" class="compare-zoom-btn" id="compareZoomOut" title="Zoom Out">-</button>
+                    <button type="button" class="compare-zoom-btn compare-zoom-reset" id="compareZoomReset" title="Reset Zoom"><span id="compareZoomLevel">100%</span></button>
+                    <button type="button" class="compare-zoom-btn" id="compareZoomIn" title="Zoom In">+</button>
+                </div>
+                <div class="compare-image-container" id="compareImageContainer">
                     <img src="${url2}" alt="Image 2" class="compare-img compare-img-back">
                     <div class="compare-img-front-wrapper">
                         <img src="${url1}" alt="Image 1" class="compare-img compare-img-front">
@@ -759,7 +833,80 @@ document.addEventListener('DOMContentLoaded', () => {
         modal.classList.add('active');
         document.body.style.overflow = 'hidden';
 
+        resetCompareZoom();
         initCompareSlider();
+        initCompareZoomControls();
+    }
+
+    function initCompareZoomControls() {
+        const zoomInBtn = document.getElementById('compareZoomIn');
+        const zoomOutBtn = document.getElementById('compareZoomOut');
+        const zoomResetBtn = document.getElementById('compareZoomReset');
+        const imageContainer = document.getElementById('compareImageContainer');
+        const slider = document.getElementById('compareSlider');
+
+        if (!zoomInBtn || !zoomOutBtn || !zoomResetBtn || !imageContainer || !slider) {
+            return;
+        }
+
+        zoomInBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setCompareZoom(compareZoom + COMPARE_ZOOM_STEP);
+        });
+
+        zoomOutBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setCompareZoom(compareZoom - COMPARE_ZOOM_STEP);
+        });
+
+        zoomResetBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            resetCompareZoom();
+        });
+
+        imageContainer.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const delta = e.deltaY < 0 ? COMPARE_ZOOM_STEP : -COMPARE_ZOOM_STEP;
+            setCompareZoom(compareZoom + delta);
+        }, { passive: false });
+
+        imageContainer.addEventListener('mousedown', (e) => {
+            if (e.button !== 0 || compareZoom <= 1) return;
+            if (e.target === slider || slider.contains(e.target)) return;
+
+            isComparePanning = true;
+            comparePanStartX = e.clientX;
+            comparePanStartY = e.clientY;
+            comparePanOriginX = comparePanX;
+            comparePanOriginY = comparePanY;
+            suppressNextCompareClick = false;
+            applyCompareZoom();
+            e.preventDefault();
+        });
+
+        if (!comparePanListenersBound) {
+            document.addEventListener('mousemove', (e) => {
+                if (!isComparePanning) return;
+
+                const dx = e.clientX - comparePanStartX;
+                const dy = e.clientY - comparePanStartY;
+                if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+                    suppressNextCompareClick = true;
+                }
+
+                comparePanX = comparePanOriginX + dx;
+                comparePanY = comparePanOriginY + dy;
+                applyCompareZoom();
+            });
+
+            document.addEventListener('mouseup', () => {
+                if (!isComparePanning) return;
+                isComparePanning = false;
+                applyCompareZoom();
+            });
+
+            comparePanListenersBound = true;
+        }
     }
 
     function initCompareSlider() {
@@ -793,6 +940,10 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         container.addEventListener('click', (e) => {
+            if (suppressNextCompareClick) {
+                suppressNextCompareClick = false;
+                return;
+            }
             if (!isDragging) {
                 updateSlider(e.clientX);
             }
@@ -818,7 +969,23 @@ document.addEventListener('DOMContentLoaded', () => {
         modal.classList.remove('active');
         document.body.style.overflow = '';
         document.getElementById('compareContainer').innerHTML = '';
+        compareZoom = 1;
+        comparePanX = 0;
+        comparePanY = 0;
+        isComparePanning = false;
+        suppressNextCompareClick = false;
     };
+
+    function setMultiSelectMode(enabled, options = {}) {
+        const { clear = false } = options;
+        isMultiSelectMode = enabled;
+        if (multiSelectModeBtn) {
+            multiSelectModeBtn.classList.toggle('active', isMultiSelectMode);
+        }
+        if (clear) {
+            clearSelection();
+        }
+    }
 
     function syncGalleryScroll(index) {
         const card = document.querySelector(`.image-card[data-index="${index}"]`);
@@ -1363,6 +1530,9 @@ document.addEventListener('DOMContentLoaded', () => {
     compareModeBtn.addEventListener('click', () => {
         isCompareMode = !isCompareMode;
         compareModeBtn.classList.toggle('active', isCompareMode);
+        if (isCompareMode) {
+            setMultiSelectMode(false, { clear: true });
+        }
 
         if (!isCompareMode) {
             selectedForCompare = [];
@@ -1373,12 +1543,29 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    if (multiSelectModeBtn) {
+        multiSelectModeBtn.addEventListener('click', () => {
+            const nextMode = !isMultiSelectMode;
+            setMultiSelectMode(nextMode, { clear: !nextMode });
+
+            if (isMultiSelectMode && isCompareMode) {
+                isCompareMode = false;
+                compareModeBtn.classList.remove('active');
+                selectedForCompare = [];
+                compareBtn.style.display = 'none';
+                document.querySelectorAll('.selected-for-compare').forEach(card => {
+                    card.classList.remove('selected-for-compare', 'compare-first', 'compare-second');
+                });
+            }
+        });
+    }
+
     compareBtn.addEventListener('click', openCompareModal);
 
     document.getElementById('deleteSelectedBtn').addEventListener('click', deleteSelectedImages);
     document.getElementById('favoriteSelectedBtn').addEventListener('click', () => favoriteSelectedImages(true));
     document.getElementById('unfavoriteSelectedBtn').addEventListener('click', () => favoriteSelectedImages(false));
-    document.getElementById('clearSelectionBtn').addEventListener('click', clearSelection);
+    document.getElementById('clearSelectionBtn').addEventListener('click', () => setMultiSelectMode(false, { clear: true }));
 
     folderBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -1416,7 +1603,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.addEventListener('keydown', e => {
         const modal = document.getElementById('modal');
+        const compareModal = document.getElementById('compareModal');
         const isModalOpen = modal && modal.classList.contains('active');
+        const isCompareModalOpen = compareModal && compareModal.classList.contains('active');
 
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
             return;
@@ -1426,10 +1615,22 @@ document.addEventListener('DOMContentLoaded', () => {
             if (isModalOpen) {
                 closeModal();
             }
+            if (isCompareModalOpen) {
+                closeCompareModal();
+            }
             hideContextMenu();
             if (selectedImages.length > 0) {
                 clearSelection();
             }
+        } else if (isCompareModalOpen && (e.key === '+' || e.key === '=')) {
+            e.preventDefault();
+            setCompareZoom(compareZoom + COMPARE_ZOOM_STEP);
+        } else if (isCompareModalOpen && (e.key === '-' || e.key === '_')) {
+            e.preventDefault();
+            setCompareZoom(compareZoom - COMPARE_ZOOM_STEP);
+        } else if (isCompareModalOpen && e.key === '0') {
+            e.preventDefault();
+            resetCompareZoom();
         } else if (isModalOpen && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
             e.preventDefault();
             if (e.key === 'ArrowLeft') {

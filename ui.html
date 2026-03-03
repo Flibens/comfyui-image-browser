@@ -213,12 +213,16 @@
         .notification-error { border-color: #dc3545; }
         .notification-success { border-color: #2ecc71; }
 
-        .compare-wrapper { width: 100%; height: 90vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1rem; }
+        .compare-wrapper { width: 100%; height: 90vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1rem; position: relative; }
         .compare-labels { display: flex; justify-content: space-between; width: 100%; max-width: 90vw; padding: 0 1rem; }
         .compare-label { background: rgba(0, 0, 0, 0.7); padding: 0.5rem 1rem; border-radius: 4px; font-size: 0.9rem; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .compare-label-left { border-left: 4px solid #2ecc71; }
         .compare-label-right { border-right: 4px solid #e74c3c; text-align: right; }
-        .compare-image-container { position: relative; max-width: 90vw; max-height: 80vh; overflow: hidden; user-select: none; }
+        .compare-zoom-controls { position: fixed; top: 1.5rem; left: 50%; transform: translateX(-50%); z-index: 1010; display: flex; align-items: center; gap: 0.45rem; background: rgba(0, 0, 0, 0.78); border: 1px solid rgba(255, 255, 255, 0.25); border-radius: 6px; padding: 0.35rem; backdrop-filter: blur(4px); }
+        .compare-zoom-btn { width: 30px; height: 30px; border: 1px solid #4a4a4a; border-radius: 4px; padding: 0; font-size: 1rem; line-height: 1; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 30px; }
+        .compare-zoom-reset { width: 64px; flex: 0 0 64px; font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+        .compare-zoom-reset #compareZoomLevel { display: inline-block; width: 100%; text-align: center; white-space: nowrap; }
+        .compare-image-container { position: relative; max-width: 90vw; max-height: 80vh; overflow: hidden; user-select: none; transform-origin: center center; transition: transform 0.12s ease; }
         .compare-img { display: block; max-width: 90vw; max-height: 90vh; width: auto; height: auto; pointer-events: none; }
         .compare-img-back { position: relative; }
         .compare-img-front-wrapper { position: absolute; top: 0; left: 0; height: 100%; width: 50%; overflow: hidden; }
@@ -417,8 +421,11 @@
         }
 
         body[data-theme="nier"] .image-card.selected {
-            box-shadow: 0 0 20px #cbb784;
-            border-color: #eadbb7;
+            box-shadow:
+                inset 0 0 0 2px #1a1712,
+                0 0 0 3px #f3e1b8,
+                0 0 28px rgba(243, 225, 184, 0.95);
+            border-color: #f3e1b8;
         }
 
         body[data-theme="nier"] .image-card.compare-first {
@@ -462,6 +469,14 @@
                 0 0 0 2px #d1ad74,
                 0 0 24px rgba(209, 173, 116, 0.7);
             border-color: #d1ad74;
+        }
+        body[data-theme="nier"] .image-card.selected.favorited {
+            box-shadow:
+                inset 0 0 0 2px #1a1712,
+                0 0 0 3px #f3e1b8,
+                0 0 0 6px rgba(209, 173, 116, 0.95),
+                0 0 30px rgba(243, 225, 184, 0.95);
+            border-color: #f3e1b8;
         }
         body[data-theme="nier"] .image-card.favorited::after {
             content: "FAV";
@@ -789,17 +804,17 @@
             background: #f3ead6;
         }
         body[data-theme="nier"] .compare-wrapper {
-            background: #cfc7b5;
-            border: 1px solid #8a7a5f;
-            box-shadow: 0 12px 22px rgba(8, 6, 4, 0.35);
-            padding: 1.5rem;
+            background: transparent;
+            border: none;
+            box-shadow: none;
+            padding: 0;
         }
         body[data-theme="nier"] .compare-labels {
             color: #2a241b;
         }
         body[data-theme="nier"] .compare-image-container {
-            border: 1px solid #8a7a5f;
-            background: #bfb39a;
+            border: 1px solid #d9c89d;
+            background: transparent;
         }
     </style>
 </head>
@@ -825,6 +840,7 @@
                 </div>
             </div>
             <button id="compareModeBtn"><span class="ui-icon">⇄</span>Compare Mode</button>
+            <button id="multiSelectModeBtn"><span class="ui-icon">◫</span>Multi-Select Mode</button>
             <button id="compareBtn"><span class="ui-icon">▥</span>Compare Selected</button>
             <button id="favoritesFilterBtn"><span class="ui-icon">★</span>Favorites</button>
             <select id="sortSelect">

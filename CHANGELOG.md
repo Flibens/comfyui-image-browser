@@ -2,11 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-03-03
+- Added compare zoom controls and shortcuts (`+`, `-`, `0`), including mouse-wheel zoom.
+- Added compare drag/pan while zoomed for easier inspection.
+- Added `Multi-Select Mode` button (no Ctrl required) and kept Ctrl/Cmd multi-select support.
+- Ctrl/Cmd multi-select now auto-enables Multi-Select Mode.
+- Toggling Multi-Select Mode off now clears selections; `Clear` also exits multi-select mode.
+
 ## [1.3.1] - 2026-02-26
 - Security fix: sanitize endpoint file paths to prevent path traversal / arbitrary file access.
 - Hardened: metadata, thumbnail, and delete endpoints now enforce bounded path resolution.
 - Hardened: add_folder now validates canonical paths against allowed ComfyUI roots.
-- Recommendation: upgrade to v1.3.1+.
 
 ## [1.3.0] - 2026-02-16
 - Fixed prompt truncation on sdxl
