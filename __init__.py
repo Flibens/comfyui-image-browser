@@ -19,7 +19,7 @@ except ImportError:
 
 # --- Constants ---
 WEB_DIRECTORY = "./web"
-__version__ = "1.4.3"
+__version__ = "1.4.4"
 MODULE_DIR = Path(__file__).parent
 LEGACY_ADDITIONAL_FOLDERS_FILE = MODULE_DIR / "folders.json"
 LEGACY_FAVORITES_FILE = MODULE_DIR / "favorites.json"
@@ -50,7 +50,7 @@ def _get_persistent_state_dir():
 
     for candidate in candidates:
         try:
-            state_dir = candidate.expanduser().resolve() / "gemini-image-browser"
+            state_dir = candidate.expanduser().resolve() / "comfyui-image-browser"
             state_dir.mkdir(parents=True, exist_ok=True)
             return state_dir
         except Exception:
@@ -61,6 +61,7 @@ def _get_persistent_state_dir():
     return fallback_dir
 
 STATE_DIRECTORY = _get_persistent_state_dir()
+LEGACY_STATE_DIRECTORY = STATE_DIRECTORY.parent / "gemini-image-browser"
 ADDITIONAL_FOLDERS_FILE = STATE_DIRECTORY / "folders.json"
 FAVORITES_FILE = STATE_DIRECTORY / "favorites.json"
 
@@ -168,6 +169,8 @@ def save_json(data, file_path):
 
 def _initialize_persistent_state():
     migrations = [
+        (LEGACY_STATE_DIRECTORY / "folders.json", ADDITIONAL_FOLDERS_FILE),
+        (LEGACY_STATE_DIRECTORY / "favorites.json", FAVORITES_FILE),
         (LEGACY_ADDITIONAL_FOLDERS_FILE, ADDITIONAL_FOLDERS_FILE),
         (LEGACY_FAVORITES_FILE, FAVORITES_FILE),
     ]
