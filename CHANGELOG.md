@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.1] - 2026-03-03
+- Persist favorites and additional folders in ComfyUI user data (`user/gemini-image-browser`) so updates do not overwrite user state.
+- Added automatic one-time migration from legacy in-node `favorites.json` and `folders.json`.
+
 ## [1.4.0] - 2026-03-03
 - Added compare zoom controls and shortcuts (`+`, `-`, `0`), including mouse-wheel zoom.
 - Added compare drag/pan while zoomed for easier inspection.
