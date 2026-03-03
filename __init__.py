@@ -1,5 +1,5 @@
 """
-ComfyUI Gemini Image Browser - Fixed Metadata Version
+ComfyUI Image Browser - Fixed Metadata Version
 """
 
 import os
@@ -19,7 +19,7 @@ except ImportError:
 
 # --- Constants ---
 WEB_DIRECTORY = "./web"
-__version__ = "1.4.4"
+__version__ = "1.4.5"
 MODULE_DIR = Path(__file__).parent
 LEGACY_ADDITIONAL_FOLDERS_FILE = MODULE_DIR / "folders.json"
 LEGACY_FAVORITES_FILE = MODULE_DIR / "favorites.json"
@@ -183,11 +183,11 @@ def _initialize_persistent_state():
 
             if legacy_file.exists():
                 shutil.copy2(legacy_file, persistent_file)
-                print(f"[Gemini Image Browser] Migrated {legacy_file.name} -> {persistent_file}")
+                print(f"[ComfyUI Image Browser] Migrated {legacy_file.name} -> {persistent_file}")
             else:
                 save_json([], persistent_file)
         except Exception as e:
-            print(f"[Gemini Image Browser] Failed to initialize {persistent_file}: {e}")
+            print(f"[ComfyUI Image Browser] Failed to initialize {persistent_file}: {e}")
 
 def _safe_str(value):
     if value is None:
@@ -860,7 +860,7 @@ def extract_workflow_nodes(metadata):
 # --- API Endpoints ---
 @server.PromptServer.instance.routes.get("/gemini-image-browser/list")
 async def list_images(request):
-    print("\n--- Gemini Image Browser: Received list request ---")
+    print("\n--- ComfyUI Image Browser: Received list request ---")
     try:
         page = int(request.query.get('page', 0))
         per_page = int(request.query.get('per_page', 50))
@@ -1174,6 +1174,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {}
 
 _initialize_persistent_state()
 
-print("--- Gemini Image Browser ---")
+print("--- ComfyUI Image Browser ---")
 print(f"Loaded v{__version__}. UI available via button in menu.")
 print(f"Data directory: {STATE_DIRECTORY}")

@@ -2,8 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.5] - 2026-03-03
+- Fixed some cosmetic issues.
+
 ## [1.4.4] - 2026-03-03
 - Fixed minor issues.
+- Updated runtime log labels from `Gemini Image Browser` to `ComfyUI Image Browser`.
 
 ## [1.4.3] - 2026-03-03
 - Fixed minor issues.
