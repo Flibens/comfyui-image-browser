@@ -20,8 +20,49 @@ except ImportError:
 # --- Constants ---
 WEB_DIRECTORY = "./web"
 __version__ = "1.4.0"
-ADDITIONAL_FOLDERS_FILE = Path(__file__).parent / "folders.json"
-FAVORITES_FILE = Path(__file__).parent / "favorites.json"
+MODULE_DIR = Path(__file__).parent
+LEGACY_ADDITIONAL_FOLDERS_FILE = MODULE_DIR / "folders.json"
+LEGACY_FAVORITES_FILE = MODULE_DIR / "favorites.json"
+
+def _get_persistent_state_dir():
+    candidates = []
+
+    get_user_directory = getattr(folder_paths, "get_user_directory", None)
+    if callable(get_user_directory):
+        try:
+            candidates.append(Path(get_user_directory()))
+        except Exception:
+            pass
+
+    user_directory = getattr(folder_paths, "user_directory", None)
+    if user_directory:
+        try:
+            candidates.append(Path(user_directory))
+        except Exception:
+            pass
+
+    base_path = getattr(folder_paths, "base_path", None)
+    if base_path:
+        try:
+            candidates.append(Path(base_path) / "user")
+        except Exception:
+            pass
+
+    for candidate in candidates:
+        try:
+            state_dir = candidate.expanduser().resolve() / "gemini-image-browser"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            return state_dir
+        except Exception:
+            continue
+
+    fallback_dir = MODULE_DIR / ".state"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    return fallback_dir
+
+STATE_DIRECTORY = _get_persistent_state_dir()
+ADDITIONAL_FOLDERS_FILE = STATE_DIRECTORY / "folders.json"
+FAVORITES_FILE = STATE_DIRECTORY / "favorites.json"
 
 # --- Helper Functions ---
 def _is_relative_to(path_obj, base_obj):
@@ -103,6 +144,26 @@ def load_json(file_path):
 def save_json(data, file_path):
     with open(file_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2)
+
+def _initialize_persistent_state():
+    migrations = [
+        (LEGACY_ADDITIONAL_FOLDERS_FILE, ADDITIONAL_FOLDERS_FILE),
+        (LEGACY_FAVORITES_FILE, FAVORITES_FILE),
+    ]
+
+    for legacy_file, persistent_file in migrations:
+        try:
+            persistent_file.parent.mkdir(parents=True, exist_ok=True)
+            if persistent_file.exists():
+                continue
+
+            if legacy_file.exists():
+                shutil.copy2(legacy_file, persistent_file)
+                print(f"[Gemini Image Browser] Migrated {legacy_file.name} -> {persistent_file}")
+            else:
+                save_json([], persistent_file)
+        except Exception as e:
+            print(f"[Gemini Image Browser] Failed to initialize {persistent_file}: {e}")
 
 def _safe_str(value):
     if value is None:
@@ -1090,5 +1151,8 @@ async def get_js(request):
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
+_initialize_persistent_state()
+
 print("--- Gemini Image Browser ---")
 print(f"Loaded v{__version__}. UI available via button in menu.")
+print(f"Data directory: {STATE_DIRECTORY}")
