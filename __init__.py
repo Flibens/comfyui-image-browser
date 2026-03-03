@@ -19,7 +19,7 @@ except ImportError:
 
 # --- Constants ---
 WEB_DIRECTORY = "./web"
-__version__ = "1.4.1"
+__version__ = "1.4.3"
 MODULE_DIR = Path(__file__).parent
 LEGACY_ADDITIONAL_FOLDERS_FILE = MODULE_DIR / "folders.json"
 LEGACY_FAVORITES_FILE = MODULE_DIR / "favorites.json"
@@ -104,7 +104,7 @@ def _build_folder_map():
             resolved = Path(folder_path).expanduser().resolve()
         except Exception:
             continue
-        if resolved.exists() and resolved.is_dir() and _is_under_allowed_roots(resolved):
+        if resolved.exists() and resolved.is_dir():
             folder_map[folder_id] = resolved
 
     return folder_map
@@ -132,14 +132,35 @@ def _resolve_file_from_request(base_dir, request_path):
     return full_path
 
 def load_json(file_path):
-    if file_path.exists():
+    if not file_path.exists():
+        return []
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"Error reading {file_path}: {e}")
+        return []
+
+    # Treat empty/whitespace files as empty arrays and auto-heal to valid JSON.
+    if not content.strip():
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Error loading {file_path}: {e}")
-            return []
-    return []
+            save_json([], file_path)
+        except Exception:
+            pass
+        return []
+
+    try:
+        parsed = json.loads(content)
+        return parsed if isinstance(parsed, list) else []
+    except Exception as e:
+        # Auto-heal invalid JSON to prevent repeated parse spam in logs.
+        print(f"Error loading {file_path}: {e} (resetting to [])")
+        try:
+            save_json([], file_path)
+        except Exception:
+            pass
+        return []
 
 def save_json(data, file_path):
     with open(file_path, 'w', encoding='utf-8') as f:
@@ -1097,9 +1118,6 @@ async def add_folder_endpoint(request):
         return web.json_response({'error': 'Invalid folder path'}, status=400)
     if not normalized_path.exists() or not normalized_path.is_dir():
         return web.json_response({'error': 'Folder does not exist'}, status=400)
-    if not _is_under_allowed_roots(normalized_path):
-        return web.json_response({'error': 'Folder path is not allowed'}, status=400)
-    
     folders = load_json(ADDITIONAL_FOLDERS_FILE)
     folder_id = f"folder_{len(folders)}_{os.urandom(2).hex()}"
     new_folder = {'id': folder_id, 'name': name, 'path': str(normalized_path)}
