@@ -1,4 +1,7 @@
 document.addEventListener('DOMContentLoaded', () => {
+    // --- Mode Detection ---
+    const isMiniMode = new URLSearchParams(window.location.search).get('mode') === 'mini';
+
     // --- State Variables ---
     let currentPage = 0;
     let isLoading = false;
@@ -626,7 +629,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const params = new URLSearchParams({
             page: currentPage,
-            per_page: 50,
+            per_page: isMiniMode ? 30 : 50,
             sort: currentSort,
             search: currentSearch,
             folder: showFavoritesOnly ? 'all' : currentFolder,
@@ -1492,7 +1495,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function applyTheme(theme) {
-        const normalized = theme === 'nier' ? 'nier' : 'dark';
+        const valid = ['dark', 'nier', 'forest'];
+        const normalized = valid.includes(theme) ? theme : 'dark';
         document.body.dataset.theme = normalized;
     }
 
@@ -1524,6 +1528,27 @@ document.addEventListener('DOMContentLoaded', () => {
             const selected = e.target.value;
             applyTheme(selected);
             localStorage.setItem('geminiImageBrowserTheme', selected);
+        });
+    }
+
+    // --- Open Mode Switcher ---
+    const openModeSelect = document.getElementById('openModeSelect');
+    if (openModeSelect) {
+        const savedMode = localStorage.getItem('geminiImageBrowserOpenMode') || 'tab';
+        openModeSelect.value = savedMode;
+
+        openModeSelect.addEventListener('change', (e) => {
+            const newMode = e.target.value;
+            localStorage.setItem('geminiImageBrowserOpenMode', newMode);
+
+            if (isMiniMode && newMode === 'tab') {
+                // Switch from mini to tab: tell parent to close iframe + open tab
+                window.parent.postMessage({ type: 'gemini-browser-switch-to-tab' }, '*');
+            } else if (!isMiniMode && newMode === 'mini') {
+                // User switched to mini from a full tab — just save the preference.
+                // Next time they click the button in ComfyUI, it will open as mini.
+                showNotification('Next time you open Image Browser, it will use Mini Window mode.');
+            }
         });
     }
 

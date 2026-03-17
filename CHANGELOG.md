@@ -2,8 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-03-17
+- Added a mini version of the browser inside ComfyUI.
+- Added a new theme.
+
 ## [1.4.4] - 2026-03-03
 - Fixed minor issues.
+- Updated runtime log labels from `Gemini Image Browser` to `ComfyUI Image Browser`.
 
 ## [1.4.3] - 2026-03-03
 - Fixed minor issues.
