@@ -509,6 +509,169 @@ def _sanitize_prompt_text(prompt_text):
             out_lines.append(line)
     return '\n'.join(out_lines).strip()
 
+
+def _decode_json_maybe(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
+
+
+def _is_link_ref(value):
+    return isinstance(value, (list, tuple)) and len(value) >= 1 and isinstance(value[0], (str, int))
+
+
+def _node_title(node):
+    if not isinstance(node, dict):
+        return ''
+    meta = node.get('_meta') or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    return str(node.get('title') or meta.get('title') or '')
+
+
+def _node_type(node):
+    if not isinstance(node, dict):
+        return ''
+    return str(node.get('class_type') or node.get('type') or '')
+
+
+def _iter_ui_workflow_nodes(workflow_data):
+    """Yield (node, id_prefix, subgraph_name) for top-level and definitions.subgraphs UI nodes."""
+    if not isinstance(workflow_data, dict):
+        return
+
+    for node in workflow_data.get('nodes', []) or []:
+        if isinstance(node, dict):
+            yield node, '', None
+
+    definitions = workflow_data.get('definitions')
+    if not isinstance(definitions, dict):
+        return
+
+    for subgraph in definitions.get('subgraphs', []) or []:
+        if not isinstance(subgraph, dict):
+            continue
+        subgraph_id = _safe_str(subgraph.get('id') or subgraph.get('name') or 'subgraph')
+        subgraph_name = _safe_str(subgraph.get('name') or subgraph_id)
+        for node in subgraph.get('nodes', []) or []:
+            if isinstance(node, dict):
+                yield node, f'{subgraph_id}:', subgraph_name
+
+
+def _coerce_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if re.fullmatch(r'-?\d+', text):
+            return int(text)
+        if re.fullmatch(r'-?\d+\.\d+', text):
+            return float(text)
+    return None
+
+
+def _resolve_api_value(prompt_graph, value, preferred_names=None, want='text', visited=None):
+    """Resolve a ComfyUI API graph input, following links through text/prompt/string/size helper nodes."""
+    if visited is None:
+        visited = set()
+    preferred_names = preferred_names or []
+
+    if _is_link_ref(value):
+        node_key = str(value[0])
+        if node_key in visited:
+            return None
+        visited.add(node_key)
+        ref_node = prompt_graph.get(node_key)
+        if not isinstance(ref_node, dict):
+            return None
+        return _extract_api_node_value(prompt_graph, ref_node, preferred_names, want, visited)
+
+    if want == 'number':
+        return _coerce_number(value)
+    if isinstance(value, str):
+        return value.strip()
+    if value is not None and want != 'text':
+        return value
+    return None
+
+
+def _extract_api_node_value(prompt_graph, node, preferred_names=None, want='text', visited=None):
+    preferred_names = preferred_names or []
+    visited = visited or set()
+    inputs = node.get('inputs', {}) if isinstance(node, dict) else {}
+    if not isinstance(inputs, dict):
+        return None
+
+    node_type_l = _node_type(node).lower()
+    if want == 'text' and 'stringconcatenate' in node_type_l:
+        delimiter = inputs.get('delimiter', '')
+        if not isinstance(delimiter, str):
+            delimiter = ''
+        parts = []
+        for key in sorted([k for k in inputs if str(k).startswith('string_')]):
+            part = _resolve_api_value(prompt_graph, inputs.get(key), want='text', visited=set(visited))
+            if isinstance(part, str) and part.strip():
+                parts.append(part.strip())
+        if parts:
+            return delimiter.join(parts).strip()
+
+    for name in preferred_names:
+        if name in inputs:
+            resolved = _resolve_api_value(prompt_graph, inputs.get(name), preferred_names, want, set(visited))
+            if resolved not in (None, ''):
+                return resolved
+    if want == 'text' and any(name in inputs for name in preferred_names):
+        # A preferred text/prompt field exists but is empty. Do not fall through into
+        # unrelated inputs such as clip/model/vae links and mistake filenames for prompts.
+        return None
+
+    if want == 'number':
+        for name in ['width', 'height', 'steps', 'cfg', 'seed', 'value', 'number', 'int', 'float']:
+            if name in inputs:
+                resolved = _resolve_api_value(prompt_graph, inputs.get(name), preferred_names, want, set(visited))
+                if resolved is not None:
+                    return resolved
+        for value in inputs.values():
+            resolved = _resolve_api_value(prompt_graph, value, preferred_names, want, set(visited))
+            if resolved is not None:
+                return resolved
+        return None
+
+    for name in ['text', 'prompt', 'positive', 'negative', 'string', 'string_a', 'value', 'name']:
+        if name in inputs:
+            resolved = _resolve_api_value(prompt_graph, inputs.get(name), preferred_names, want, set(visited))
+            if isinstance(resolved, str) and resolved.strip():
+                return resolved.strip()
+
+    for value in inputs.values():
+        resolved = _resolve_api_value(prompt_graph, value, preferred_names, want, set(visited))
+        if isinstance(resolved, str) and resolved.strip():
+            return resolved.strip()
+    return None
+
+
+def _add_lora(parsed, name, strength_model=1.0, strength_clip=None):
+    if not name:
+        return
+    lora_name = str(name).strip()
+    if lora_name in ['None', '', 'ComfyUI']:
+        return
+    if any(l['name'] == lora_name for l in parsed['loras']):
+        return
+    if strength_clip is None:
+        strength_clip = strength_model
+    parsed['loras'].append({
+        'name': lora_name,
+        'strength_model': strength_model,
+        'strength_clip': strength_clip,
+    })
+
+
 def parse_comfy_metadata(metadata):
     """Parse ComfyUI/SD metadata with broad heuristics"""
     parsed = {
@@ -584,180 +747,171 @@ def parse_comfy_metadata(metadata):
                                         'strength_clip': strength
                                     })
         
-        # If parameters parsing didn't work, try ComfyUI workflow format
-        if not parsed['prompt'] or len(parsed['loras']) == 0:
-            workflow = metadata.get('workflow', {})
-            if isinstance(workflow, str):
-                workflow = json.loads(workflow)
-            
-            if workflow and isinstance(workflow, dict):
-                nodes = workflow.get('nodes', [])
-                
-                for node in nodes:
-                    node_type = node.get('type', '')
-                    widgets = node.get('widgets_values', [])
-                    inputs = node.get('inputs', {})
-                    title = node.get('title', '').lower()
-                    
-                    # Extract prompts
-                    if 'CLIPTextEncode' in node_type or 'Conditioning' in node_type or 'PromptText' in node_type:
-                        text = widgets[0] if widgets and isinstance(widgets[0], str) else inputs.get('text')
-                        if text:
-                            # Check if it's negative prompt
-                            is_negative = any(word in title for word in ['negative', 'neg'])
-                            if is_negative and not parsed['negative_prompt']:
-                                parsed['negative_prompt'] = text
-                            elif not is_negative and not parsed['prompt']:
-                                parsed['prompt'] = text
-                    
-                    # Extract sampler settings
-                    elif 'KSampler' in node_type:
-                        if not parsed['seed']:
-                            parsed['seed'] = widgets[0] if widgets else inputs.get('seed')
-                        if not parsed['steps']:
-                            parsed['steps'] = widgets[1] if len(widgets) > 1 else inputs.get('steps')
-                        if not parsed['cfg']:
-                            parsed['cfg'] = widgets[2] if len(widgets) > 2 else inputs.get('cfg')
-                        if not parsed['sampler']:
-                            parsed['sampler'] = widgets[3] if len(widgets) > 3 else inputs.get('sampler_name')
-                        if not parsed['scheduler']:
-                            parsed['scheduler'] = widgets[4] if len(widgets) > 4 else inputs.get('scheduler')
-                    
-                    # Extract model
-                    elif 'CheckpointLoader' in node_type or 'CheckpointLoaderSimple' in node_type:
-                        if not parsed['model']:
-                            parsed['model'] = widgets[0] if widgets else inputs.get('ckpt_name')
-                    
-                    # Extract LoRAs - COMPREHENSIVE DETECTION
-                    elif any(kw in node_type.lower() for kw in ['lora', 'loraloader', 'lora stacker', 'lora_stack']):
-                        try:
-                            # LoRA Manager format - JSON objects with 'active' flag
-                            if widgets and isinstance(widgets[0], list):
-                                lora_list = widgets[0]
-                                for lora_obj in lora_list:
-                                    if isinstance(lora_obj, dict):
-                                        lora_name = lora_obj.get('name')
-                                        is_active = lora_obj.get('active', True)
-                                        strength = lora_obj.get('strength', 1.0)
-                                        clip_strength = lora_obj.get('clipStrength', 1.0)
-                                        
-                                        # Only add if active, has a valid name, and avoid invalid names
-                                        if (lora_name and 
-                                            lora_name not in ['None', '', 'ComfyUI'] and 
-                                            is_active):
-                                            # Check if already added
-                                            if not any(l['name'] == lora_name for l in parsed['loras']):
-                                                parsed['loras'].append({
-                                                    'name': lora_name,
-                                                    'strength_model': strength,
-                                                    'strength_clip': clip_strength
-                                                })
-                            
-                            # Standard LoRA Loader format (name, strength_model, strength_clip)
-                            else:
-                                lora_name = widgets[0] if widgets else inputs.get('lora_name')
-                                # Only add valid LoRA names
-                                if lora_name and lora_name not in ['None', '', 'ComfyUI']:
-                                    # Check if already added
-                                    if not any(l['name'] == lora_name for l in parsed['loras']):
-                                        parsed['loras'].append({
-                                            'name': lora_name,
-                                            'strength_model': widgets[1] if len(widgets) > 1 else inputs.get('strength_model', 1.0),
-                                            'strength_clip': widgets[2] if len(widgets) > 2 else inputs.get('strength_clip', 1.0)
-                                        })
-                        
-                        except Exception as e:
-                            print(f"Error parsing LoRAs from node {node_type}: {e}")
-                    
-                    # Extract dimensions
-                    elif 'EmptyLatentImage' in node_type:
-                        if not parsed['width']:
-                            parsed['width'] = widgets[0] if widgets else inputs.get('width')
-                        if not parsed['height']:
-                            parsed['height'] = widgets[1] if len(widgets) > 1 else inputs.get('height')
+        # ComfyUI UI workflow format. Newer ComfyUI can keep important nodes inside
+        # workflow.definitions.subgraphs, so iterate both top-level and subgraph nodes.
+        workflow = _decode_json_maybe(metadata.get('workflow', {}))
+        if isinstance(workflow, dict):
+            for node, _id_prefix, _subgraph_name in _iter_ui_workflow_nodes(workflow):
+                node_type = _node_type(node)
+                node_type_l = node_type.lower()
+                widgets = node.get('widgets_values', [])
+                inputs = node.get('inputs', {})
+                title = _node_title(node).lower()
 
-        # Parse API prompt graph JSON (ComfyUI default Save Image metadata)
-        if isinstance(metadata.get('prompt'), dict) and (not parsed['prompt'] or not parsed['negative_prompt']):
-            prompt_graph = metadata['prompt']
+                # Extract prompts from core and custom text-encode/prompt nodes.
+                if any(kw in node_type_l for kw in ['cliptextencode', 'textencode', 'conditioning', 'prompttext']):
+                    text = widgets[0] if widgets and isinstance(widgets[0], str) else None
+                    if not text and isinstance(inputs, dict):
+                        text = inputs.get('text') or inputs.get('prompt')
+                    if text:
+                        is_negative = any(word in title for word in ['negative', 'neg'])
+                        if is_negative and not parsed['negative_prompt']:
+                            parsed['negative_prompt'] = text
+                        elif not is_negative and not parsed['prompt']:
+                            parsed['prompt'] = text
 
-            def _linked_text(link_ref):
-                if not isinstance(link_ref, (list, tuple)) or len(link_ref) == 0:
-                    return None
-                node_key = str(link_ref[0])
-                ref_node = prompt_graph.get(node_key)
-                if not isinstance(ref_node, dict):
-                    return None
-                ref_inputs = ref_node.get('inputs', {})
-                if not isinstance(ref_inputs, dict):
-                    return None
-                ref_text = ref_inputs.get('text')
-                if isinstance(ref_text, str) and ref_text.strip():
-                    return ref_text.strip()
-                return None
+                # Extract sampler settings.
+                if 'ksampler' in node_type_l:
+                    if not parsed['seed']:
+                        parsed['seed'] = widgets[0] if widgets else (inputs.get('seed') if isinstance(inputs, dict) else None)
+                    if not parsed['steps']:
+                        parsed['steps'] = widgets[1] if len(widgets) > 1 else (inputs.get('steps') if isinstance(inputs, dict) else None)
+                    if not parsed['cfg']:
+                        parsed['cfg'] = widgets[2] if len(widgets) > 2 else (inputs.get('cfg') if isinstance(inputs, dict) else None)
+                    if not parsed['sampler']:
+                        parsed['sampler'] = widgets[3] if len(widgets) > 3 else (inputs.get('sampler_name') if isinstance(inputs, dict) else None)
+                    if not parsed['scheduler']:
+                        parsed['scheduler'] = widgets[4] if len(widgets) > 4 else (inputs.get('scheduler') if isinstance(inputs, dict) else None)
 
-            # Preferred path: resolve positive/negative links from KSampler-like nodes
+                # Extract model/checkpoint names.
+                if any(kw in node_type_l for kw in ['checkpointloader', 'unetloader', 'modelloader']):
+                    if not parsed['model']:
+                        parsed['model'] = widgets[0] if widgets else None
+                        if not parsed['model'] and isinstance(inputs, dict):
+                            for key in ['ckpt_name', 'unet_name', 'model_name', 'name']:
+                                if inputs.get(key):
+                                    parsed['model'] = inputs.get(key)
+                                    break
+
+                # Extract LoRAs from LoRA Manager, standard loaders, stackers, and custom loaders.
+                if any(kw in node_type_l for kw in ['lora', 'loraloader', 'lora stacker', 'lora_stack']):
+                    try:
+                        if widgets and isinstance(widgets[0], list):
+                            for lora_obj in widgets[0]:
+                                if isinstance(lora_obj, dict) and lora_obj.get('active', True):
+                                    _add_lora(
+                                        parsed,
+                                        lora_obj.get('name'),
+                                        lora_obj.get('strength', 1.0),
+                                        lora_obj.get('clipStrength', lora_obj.get('strength', 1.0)),
+                                    )
+                        else:
+                            lora_name = widgets[0] if widgets else None
+                            strength_model = widgets[1] if len(widgets) > 1 else 1.0
+                            strength_clip = widgets[2] if len(widgets) > 2 else strength_model
+                            if isinstance(inputs, dict):
+                                lora_name = lora_name or inputs.get('lora_name') or inputs.get('name')
+                                strength_model = inputs.get('strength_model', inputs.get('lora_strength', inputs.get('strength', strength_model)))
+                                strength_clip = inputs.get('strength_clip', inputs.get('clip_strength', inputs.get('clipStrength', strength_model)))
+                            _add_lora(parsed, lora_name, strength_model, strength_clip)
+                    except Exception as e:
+                        print(f"Error parsing LoRAs from node {node_type}: {e}")
+
+                # Extract dimensions.
+                if 'emptylatentimage' in node_type_l or ('latent' in node_type_l and isinstance(inputs, dict) and 'width' in inputs and 'height' in inputs):
+                    if not parsed['width']:
+                        parsed['width'] = widgets[0] if widgets else inputs.get('width')
+                    if not parsed['height']:
+                        parsed['height'] = widgets[1] if len(widgets) > 1 else inputs.get('height')
+
+        # Parse API prompt graph JSON (ComfyUI default Save Image metadata). This is the
+        # most reliable source for images saved by core SaveImage and most custom save nodes.
+        prompt_graph = _decode_json_maybe(metadata.get('prompt'))
+        if isinstance(prompt_graph, dict):
+            text_candidates = []
+            api_negative_input_seen = False
             for _, node in prompt_graph.items():
                 if not isinstance(node, dict):
                     continue
-                node_type = str(node.get('class_type') or node.get('type') or '')
-                if 'KSampler' not in node_type:
-                    continue
+                node_type = _node_type(node)
+                node_type_l = node_type.lower()
+                title_l = _node_title(node).lower()
                 node_inputs = node.get('inputs', {})
                 if not isinstance(node_inputs, dict):
                     continue
 
-                if not parsed['prompt']:
-                    positive_text = _linked_text(node_inputs.get('positive'))
+                if 'ksampler' in node_type_l:
+                    # Prefer the API prompt graph over the UI workflow for sampler settings;
+                    # UI widgets include control widgets (for example randomize/fixed) that
+                    # shifted position in recent ComfyUI versions.
+                    if node_inputs.get('seed') is not None:
+                        parsed['seed'] = node_inputs.get('seed')
+                    if node_inputs.get('steps') is not None:
+                        parsed['steps'] = node_inputs.get('steps')
+                    if node_inputs.get('cfg') is not None:
+                        parsed['cfg'] = node_inputs.get('cfg')
+                    if node_inputs.get('sampler_name') is not None:
+                        parsed['sampler'] = node_inputs.get('sampler_name')
+                    if node_inputs.get('scheduler') is not None:
+                        parsed['scheduler'] = node_inputs.get('scheduler')
+
+                    positive_text = _resolve_api_value(prompt_graph, node_inputs.get('positive'), ['text', 'prompt', 'positive', 'string_a', 'string'], 'text')
                     if positive_text:
                         parsed['prompt'] = positive_text
-
-                if not parsed['negative_prompt']:
-                    negative_text = _linked_text(node_inputs.get('negative'))
+                    if 'negative' in node_inputs:
+                        api_negative_input_seen = True
+                    negative_text = _resolve_api_value(prompt_graph, node_inputs.get('negative'), ['text', 'prompt', 'negative', 'string_a', 'string'], 'text')
                     if negative_text:
                         parsed['negative_prompt'] = negative_text
+                    elif 'negative' in node_inputs:
+                        # The API graph explicitly says the negative input is empty. Do not keep
+                        # stale/wrong text guessed from UI widgets (recent ComfyUI widgets moved).
+                        parsed['negative_prompt'] = None
 
-                if parsed['prompt'] and parsed['negative_prompt']:
+                if any(key in node_inputs for key in ['ckpt_name', 'unet_name', 'model_name']) or any(kw in node_type_l for kw in ['checkpointloader', 'unetloader', 'modelloader', 'ditloader']):
+                    for key in ['ckpt_name', 'unet_name', 'model_name', 'name']:
+                        if isinstance(node_inputs.get(key), str) and node_inputs.get(key).strip():
+                            parsed['model'] = node_inputs.get(key).strip()
+                            break
+
+                if any(kw in node_type_l for kw in ['lora', 'loraloader', 'lora_stack', 'lora stacker']):
+                    lora_name = _resolve_api_value(prompt_graph, node_inputs.get('lora_name') or node_inputs.get('name'), ['lora_name', 'name'], 'text')
+                    strength_model = node_inputs.get('strength_model', node_inputs.get('lora_strength', node_inputs.get('strength', 1.0)))
+                    strength_clip = node_inputs.get('strength_clip', node_inputs.get('clip_strength', node_inputs.get('clipStrength', strength_model)))
+                    _add_lora(parsed, lora_name, strength_model, strength_clip)
+
+                if 'emptylatentimage' in node_type_l or ('latent' in node_type_l and 'width' in node_inputs and 'height' in node_inputs):
+                    width_value = _resolve_api_value(prompt_graph, node_inputs.get('width'), ['width'], 'number')
+                    height_value = _resolve_api_value(prompt_graph, node_inputs.get('height'), ['height'], 'number')
+                    if width_value is not None:
+                        parsed['width'] = width_value
+                    if height_value is not None:
+                        parsed['height'] = height_value
+
+                if any(kw in node_type_l for kw in ['cliptextencode', 'textencode', 'conditioning', 'prompt']):
+                    text = _extract_api_node_value(prompt_graph, node, ['text', 'prompt', 'string_a', 'string'], 'text')
+                    if isinstance(text, str) and text.strip():
+                        text_candidates.append((text.strip(), title_l))
+
+            if not parsed['negative_prompt'] and not api_negative_input_seen:
+                for text, title in text_candidates:
+                    if any(word in title for word in ['negative', 'neg']):
+                        parsed['negative_prompt'] = text
+                        break
+
+            if not parsed['prompt']:
+                for text, title in text_candidates:
+                    if not any(word in title for word in ['negative', 'neg']):
+                        parsed['prompt'] = text
+                        break
+
+            # Do not invent a negative prompt from arbitrary extra text nodes. If a
+            # workflow has a real negative prompt, it is either linked from the sampler
+            # negative input or explicitly titled negative/neg above.
+            if text_candidates and not parsed['prompt']:
+                for text, _ in text_candidates:
+                    parsed['prompt'] = text
                     break
-
-            # Fallback: scan CLIP text nodes if links were unavailable
-            if not parsed['prompt'] or not parsed['negative_prompt']:
-                clip_nodes = []
-                for _, node in prompt_graph.items():
-                    if not isinstance(node, dict):
-                        continue
-                    node_type = str(node.get('class_type') or node.get('type') or '')
-                    if 'CLIPTextEncode' not in node_type:
-                        continue
-                    node_inputs = node.get('inputs', {})
-                    if not isinstance(node_inputs, dict):
-                        continue
-                    text = node_inputs.get('text')
-                    if not (isinstance(text, str) and text.strip()):
-                        continue
-                    title = str((node.get('_meta') or {}).get('title', '')).lower()
-                    clip_nodes.append((text.strip(), title))
-
-                if not parsed['negative_prompt']:
-                    for text, title in clip_nodes:
-                        if any(word in title for word in ['negative', 'neg']):
-                            parsed['negative_prompt'] = text
-                            break
-
-                if not parsed['prompt'] and clip_nodes:
-                    for text, title in clip_nodes:
-                        if not any(word in title for word in ['negative', 'neg']):
-                            parsed['prompt'] = text
-                            break
-
-                # Last resort: if one side is still missing, use the remaining distinct CLIP text
-                if clip_nodes and (not parsed['prompt'] or not parsed['negative_prompt']):
-                    for text, _ in clip_nodes:
-                        if not parsed['prompt']:
-                            parsed['prompt'] = text
-                            continue
-                        if not parsed['negative_prompt'] and text != parsed['prompt']:
-                            parsed['negative_prompt'] = text
-                            break
     
     except Exception as e:
         print(f"Error parsing metadata: {e}")
@@ -767,6 +921,13 @@ def parse_comfy_metadata(metadata):
     # Final normalization: prompt display should not duplicate LoRA entries.
     parsed['prompt'] = _sanitize_prompt_text(parsed.get('prompt'))
     parsed['negative_prompt'] = _sanitize_prompt_text(parsed.get('negative_prompt'))
+
+    if parsed.get('prompt') and parsed.get('negative_prompt') == parsed.get('prompt'):
+        # Some workflows/models have no real negative prompt but the default ComfyUI
+        # SaveImage API graph still routes the same conditioning/text to positive and
+        # negative. Showing the same block twice is misleading; treat exact duplicates
+        # as an absent negative prompt.
+        parsed['negative_prompt'] = None
 
     return parsed
 
@@ -817,19 +978,22 @@ def extract_workflow_nodes(metadata):
 
     nodes_out = []
 
-    # UI format: {"nodes":[...]}
+    # UI format: {"nodes":[...], "definitions":{"subgraphs":[...]}}
     if isinstance(source, dict) and isinstance(source.get('nodes'), list):
-        for node in source.get('nodes', []):
+        for node, id_prefix, subgraph_name in _iter_ui_workflow_nodes(source):
             if not isinstance(node, dict):
                 continue
             if node.get('mode', 0) != 0:
                 continue
             node_id = node.get('id', 'N/A')
             node_type = node.get('type') or node.get('class_type') or 'Unknown'
+            params = _normalize_node_params_from_ui_node(node)
+            if subgraph_name:
+                params.insert(0, {'name': 'subgraph', 'value': subgraph_name})
             nodes_out.append({
-                'id': _safe_str(node_id),
+                'id': f"{id_prefix}{_safe_str(node_id)}",
                 'type': _safe_str(node_type),
-                'params': _normalize_node_params_from_ui_node(node)
+                'params': params
             })
     # API format: {"3":{"class_type":"KSampler","inputs":{...}}, ...}
     elif isinstance(source, dict):

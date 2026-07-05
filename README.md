@@ -36,7 +36,7 @@ Option 2 (git):
 In ComfyUI, click the **Image Browser** button in the top menu bar.
 
 ## Notes:
-If you have problems viewing metadata, use a different save image node, i would recommend Lora Manager´s Save Image node.
+Metadata parsing supports ComfyUI core SaveImage, LoRA Manager Save Image, and other save nodes that preserve ComfyUI `prompt`/`workflow` metadata, including workflow nodes stored inside subgraphs.
 Favorites and added folders are stored in ComfyUI user data (`user/comfyui-image-browser`) so they survive node updates.
 
 
