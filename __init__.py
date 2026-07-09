@@ -19,7 +19,7 @@ except ImportError:
 
 # --- Constants ---
 WEB_DIRECTORY = "./web"
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 MODULE_DIR = Path(__file__).parent
 LEGACY_ADDITIONAL_FOLDERS_FILE = MODULE_DIR / "folders.json"
 LEGACY_FAVORITES_FILE = MODULE_DIR / "favorites.json"

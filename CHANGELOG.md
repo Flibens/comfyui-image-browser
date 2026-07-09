@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2026-07-09
+- Added broad metadata parsing support for ComfyUI core SaveImage and other save nodes that preserve `prompt`/`workflow` metadata.
+- Resolved linked API prompt graph values for prompts, sampler settings, dimensions, models, and LoRAs.
+- Added workflow node inspector support for nodes stored inside ComfyUI subgraph definitions.
+- Fixed duplicate/phantom negative prompt display when workflows have no real negative prompt.
+- Added regression tests for default SaveImage metadata and subgraph workflow nodes.
+
 ## [1.5.0] - 2026-03-17
 - Added a mini version of the browser inside ComfyUI.
 - Added a new theme.
