@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.0] - 2026-08-31
+- Rebuilt the browser as a Studio-style media workspace with fixed navigation, fixed library tools, a dense gallery, a dedicated viewer, and a persistent Details/Nodes inspector.
+- Added Graphite and Nier Automata visual themes, including high-contrast Nier selection, A/B compare, active-filmstrip, and Open Compare states.
+- Expanded metadata extraction for saved ComfyUI image, video, and audio workflows; the lightweight inspector now exposes searchable, expandable workflow nodes alongside Details.
+- Improved viewer filmstrip boundaries so the first and final media items retain a full thumbnail window.
+- Improved folder browsing, sidebar collapse/expand behavior, and custom-folder removal through a confirmation-backed right-click menu.
+- Preserved existing browser features including favorites, search, sorting, compare mode, multi-select, external folders, and Quick Look mode.
+
 ## [1.6.0] - 2026-07-09
 - Added broad metadata parsing support for ComfyUI core SaveImage and other save nodes that preserve `prompt`/`workflow` metadata.
 - Resolved linked API prompt graph values for prompts, sampler settings, dimensions, models, and LoRAs.

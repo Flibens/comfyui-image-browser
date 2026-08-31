@@ -61,6 +61,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const compareBtn = document.getElementById('compareBtn');
     const multiSelectActions = document.getElementById('multiSelectActions');
     const themeSelect = document.getElementById('themeSelect');
+    const favoritesToolbarBtn = document.getElementById('favoritesToolbarBtn');
+    const allImagesBtn = document.getElementById('allImagesBtn');
+    const studioShell = document.getElementById('studioShell');
+    const sidebarCollapseBtn = document.getElementById('sidebarCollapseBtn');
+    const thumbnailSize = document.getElementById('thumbnailSize');
+    const currentLocation = document.getElementById('currentLocation');
+    const currentPath = document.getElementById('currentPath');
 
     // --- Context Menu Functions ---
     function createContextMenu() {
@@ -160,6 +167,37 @@ document.addEventListener('DOMContentLoaded', () => {
         if (contextMenu) {
             contextMenu.style.display = 'none';
         }
+    }
+
+    function showFolderContextMenu(event, folder) {
+        if (folder.id === 'default' || studioShell?.classList.contains('sidebar-collapsed')) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        if (!contextMenu) contextMenu = createContextMenu();
+
+        contextMenu.innerHTML = `
+            <div class="context-menu-item context-menu-item-danger" data-action="remove-folder">
+                <span class="ui-icon">×</span> Remove “${escapeHtml(folder.name)}”
+            </div>
+        `;
+        contextMenu.style.display = 'block';
+        contextMenu.style.left = `${event.pageX + 10}px`;
+        contextMenu.style.top = `${event.pageY + 10}px`;
+
+        requestAnimationFrame(() => {
+            const rect = contextMenu.getBoundingClientRect();
+            if (rect.right > window.innerWidth) contextMenu.style.left = `${event.pageX - rect.width - 10}px`;
+            if (rect.bottom > window.innerHeight) contextMenu.style.top = `${event.pageY - rect.height - 10}px`;
+        });
+
+        contextMenu.querySelector('[data-action="remove-folder"]').addEventListener('click', async (clickEvent) => {
+            clickEvent.stopPropagation();
+            hideContextMenu();
+            if (confirm(`Remove "${folder.name}" from the list? (Files won't be deleted)`)) {
+                await removeFolder(folder.id);
+            }
+        });
     }
 
     function getModalImageElement() {
@@ -1001,6 +1039,35 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function renderModalFilmstrip() {
+        const strip = document.getElementById('modalFilmstrip');
+        const count = document.getElementById('filmstripCount');
+        if (!strip || !count || currentImageIndex < 0) return;
+
+        const windowSize = 17;
+        const centeredStart = currentImageIndex - Math.floor(windowSize / 2);
+        const start = Math.min(
+            Math.max(0, centeredStart),
+            Math.max(0, currentImages.length - windowSize)
+        );
+        const end = Math.min(currentImages.length, start + windowSize);
+        strip.innerHTML = currentImages.slice(start, end).map((item, offset) => {
+            const index = start + offset;
+            const url = `/gemini-image-browser/thumbnail?filename=${encodeURIComponent(item.path)}&folder=${item.folder_id}`;
+            const isVideo = /\.(mp4|webm|mov)$/i.test(item.path);
+            const isAudio = /\.(mp3|wav|ogg|flac|m4a)$/i.test(item.path);
+            const preview = isAudio
+                ? '<span aria-hidden="true">♪</span>'
+                : (isVideo ? `<video src="${url}" muted preload="metadata"></video>` : `<img src="${url}" alt="">`);
+            return `<button type="button" class="filmstrip-thumb${index === currentImageIndex ? ' active' : ''}" data-filmstrip-index="${index}" title="${escapeHtml(item.name)}">${preview}</button>`;
+        }).join('');
+        count.textContent = `${currentImageIndex + 1} / ${currentImages.length}`;
+        strip.querySelectorAll('[data-filmstrip-index]').forEach((button) => {
+            button.addEventListener('click', () => openModal(Number(button.dataset.filmstripIndex)));
+        });
+        requestAnimationFrame(() => strip.querySelector('.filmstrip-thumb.active')?.scrollIntoView({ block: 'nearest', inline: 'center' }));
+    }
+
     async function openModal(index) {
         currentImageIndex = index;
         const imageData = currentImages[index];
@@ -1012,6 +1079,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const metadataPanel = document.getElementById('metadataPanel');
         const navPrev = document.getElementById('modalNavPrev');
         const navNext = document.getElementById('modalNavNext');
+
+        const viewerTitle = document.getElementById('viewerTitle');
+        const viewerLocation = document.getElementById('viewerLocation');
+        if (viewerTitle) viewerTitle.textContent = imageData.name;
+        if (viewerLocation) viewerLocation.textContent = `${currentLocation?.textContent || 'Studio Library'} · ${index + 1} of ${currentImages.length}`;
 
         navPrev.style.display = index > 0 ? 'block' : 'none';
         navNext.style.display = (index < currentImages.length - 1 || hasMore) ? 'block' : 'none';
@@ -1040,6 +1112,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         modal.classList.add('active');
         document.body.style.overflow = 'hidden';
+        renderModalFilmstrip();
 
         syncGalleryScroll(index);
 
@@ -1051,8 +1124,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     ${isFavorite ? 'Favorited' : 'Add to Favorites'}
                 </button>
                 <div class="modal-view-toggle">
-                    <button id="metadataViewBtn" class="modal-view-btn active" onclick="switchMetadataView('metadata')">Metadata</button>
-                    <button id="workflowViewBtn" class="modal-view-btn" onclick="switchMetadataView('workflow')">Workflow Nodes</button>
+                    <button id="metadataViewBtn" class="modal-view-btn active" onclick="switchMetadataView('metadata')">Details</button>
+                    <button id="workflowViewBtn" class="modal-view-btn" onclick="switchMetadataView('workflow')">Nodes</button>
                 </div>
             </div>
             <div class="metadata-section">
@@ -1209,32 +1282,28 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        let html = '';
-        workflowNodes.forEach((node) => {
-            const nodeType = escapeHtml(node.type || 'Unknown');
-            const nodeId = escapeHtml(node.id || 'N/A');
-            const params = Array.isArray(node.params) ? node.params : [];
-
-            let paramsHtml = '';
-            if (params.length === 0) {
-                paramsHtml = '<li><span class="workflow-param-value">No parameters</span></li>';
-            } else {
-                params.forEach((param) => {
-                    const paramName = escapeHtml(param.name || 'param');
-                    const paramValue = escapeHtml(String(param.value ?? ''));
-                    paramsHtml += `<li><span class="workflow-param-name">${paramName}</span><span class="workflow-param-value">${paramValue}</span></li>`;
-                });
-            }
-
-            html += `
-                <div class="workflow-node-item">
-                    <div class="workflow-node-header">${nodeType}<span class="workflow-node-meta">ID: ${nodeId}</span></div>
+        container.innerHTML = `<div class="workflow-search"><input id="workflowNodeSearch" placeholder="Filter ${workflowNodes.length} nodes"></div><div id="workflowNodeList"></div>`;
+        const list = document.getElementById('workflowNodeList');
+        const render = (filter = '') => {
+            const term = filter.trim().toLowerCase();
+            const visible = workflowNodes.filter((node) => !term || `${node.title || ''} ${node.type || ''} ${node.id || ''} ${JSON.stringify(node.params || [])}`.toLowerCase().includes(term));
+            list.innerHTML = visible.map((node, index) => {
+                const title = escapeHtml(node.title || node.type || 'Unknown');
+                const nodeType = escapeHtml(node.type || 'Unknown');
+                const nodeId = escapeHtml(node.id || 'N/A');
+                const params = Array.isArray(node.params) ? node.params : [];
+                const paramsHtml = params.length
+                    ? params.map((param) => `<li><span class="workflow-param-name">${escapeHtml(param.name || 'param')}</span><span class="workflow-param-value">${escapeHtml(String(param.value ?? ''))}</span></li>`).join('')
+                    : '<li><span class="workflow-param-value">No saved parameters</span></li>';
+                const mutedClass = Number(node.mode || 0) === 0 ? '' : ' muted';
+                return `<details class="workflow-node-item${mutedClass}">
+                    <summary class="workflow-node-header"><span class="workflow-node-index">${index + 1}</span><span class="workflow-node-title"><strong>${title}</strong><small>${nodeType} · ID ${nodeId} · ${params.length} params</small></span><span class="workflow-node-chevron">›</span></summary>
                     <ul class="workflow-node-params">${paramsHtml}</ul>
-                </div>
-            `;
-        });
-
-        container.innerHTML = html;
+                </details>`;
+            }).join('') || '<p class="workflow-empty">No nodes match that filter.</p>';
+        };
+        render();
+        document.getElementById('workflowNodeSearch').addEventListener('input', (event) => render(event.target.value));
     }
 
     function displayMetadata(data) {
@@ -1286,7 +1355,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         let settingsHtml = '<div class="settings-grid">';
 
-        const size = dimensions ? `${dimensions.width} × ${dimensions.height}` : (parsed.width && parsed.height ? `${parsed.width} × ${parsed.height}` : null);
+        const size = dimensions?.width && dimensions?.height
+            ? `${dimensions.width} × ${dimensions.height}`
+            : (parsed.width && parsed.height ? `${parsed.width} × ${parsed.height}` : null);
 
         const settings = [
             { label: 'Model', value: parsed.model, fullWidth: true },
@@ -1299,24 +1370,28 @@ document.addEventListener('DOMContentLoaded', () => {
         ];
 
         settings.forEach(setting => {
-            if (setting.value) {
+            if (setting.value !== null && setting.value !== undefined && setting.value !== '') {
                 settingsHtml += `
                     <div class="metadata-item ${setting.fullWidth ? 'full-width' : ''}">
-                        <div class="metadata-label">${setting.label}</div>
+                        <div class="metadata-label-row"><div class="metadata-label">${setting.label}</div>${setting.label === 'Seed' ? '<button class="metadata-copy-btn" type="button" data-copy-seed>Copy</button>' : ''}</div>
                         <div class="metadata-value">${escapeHtml(setting.value)}</div>
                     </div>
                 `;
             }
         });
         settingsHtml += '</div>';
+        if (data.extra && Object.keys(data.extra).length) {
+            settingsHtml += `<div class="metadata-extra-grid">${Object.entries(data.extra).map(([label, value]) => `<div class="metadata-kv"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(String(value))}</div></div>`).join('')}</div>`;
+        }
         document.getElementById('settingsSection').innerHTML = settingsHtml;
+        document.querySelector('[data-copy-seed]')?.addEventListener('click', () => copyPromptToClipboard(String(parsed.seed), 'Seed'));
 
         let lorasHtml = '';
         if (parsed.loras && parsed.loras.length > 0) {
             parsed.loras.forEach(lora => {
                 lorasHtml += `
                     <div class="lora-item">
-                        <div class="lora-name">${escapeHtml(lora.name)}</div>
+                        <div class="metadata-label-row"><div class="lora-name">${escapeHtml(lora.name)}</div><button class="metadata-copy-btn" type="button" data-copy-lora="${escapeHtml(lora.name)}">Copy</button></div>
                         <div class="lora-strength">Model: ${lora.strength_model} | CLIP: ${lora.strength_clip}</div>
                     </div>
                 `;
@@ -1325,6 +1400,7 @@ document.addEventListener('DOMContentLoaded', () => {
             lorasHtml = '<p style="color: #888; margin: 0;">No LoRAs used.</p>';
         }
         document.getElementById('lorasSection').innerHTML = lorasHtml;
+        document.querySelectorAll('[data-copy-lora]').forEach((button) => button.addEventListener('click', () => copyPromptToClipboard(button.dataset.copyLora, 'LoRA name')));
 
         renderWorkflowNodes(data.workflow_nodes || []);
     }
@@ -1405,28 +1481,25 @@ document.addEventListener('DOMContentLoaded', () => {
             content.textContent = folder.name;
             content.onclick = () => {
                 currentFolder = folder.id;
-                folderDropdown.classList.remove('active');
+                showFavoritesOnly = false;
                 loadImages(true);
             };
             item.appendChild(content);
-
-            // Add delete button only for custom folders (not the default)
-            if (folder.id !== 'default') {
-                const deleteBtn = document.createElement('button');
-                deleteBtn.className = 'folder-item-delete';
-                deleteBtn.innerHTML = '■';
-                deleteBtn.title = 'Delete folder';
-                deleteBtn.onclick = async (e) => {
-                    e.stopPropagation();
-                    if (confirm(`Remove "${folder.name}" from the list? (Files won't be deleted)`)) {
-                        await removeFolder(folder.id);
-                    }
-                };
-                item.appendChild(deleteBtn);
-            }
+            item.addEventListener('contextmenu', (event) => showFolderContextMenu(event, folder));
 
             folderList.appendChild(item);
         });
+        updateWorkspaceLocation();
+    }
+
+    function updateWorkspaceLocation() {
+        const activeFolder = availableFolders.find((folder) => folder.id === currentFolder);
+        const label = showFavoritesOnly ? 'Favorites' : (activeFolder?.name || 'All Images');
+        if (currentLocation) currentLocation.textContent = label;
+        if (currentPath) currentPath.textContent = showFavoritesOnly ? 'Smart Collection' : 'Studio Library';
+        favoritesFilterBtn?.classList.toggle('active', showFavoritesOnly);
+        favoritesToolbarBtn?.classList.toggle('active', showFavoritesOnly);
+        allImagesBtn?.classList.toggle('active', !showFavoritesOnly && currentFolder === 'default');
     }
 
     async function addNewFolder() {
@@ -1495,9 +1568,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function applyTheme(theme) {
-        const valid = ['dark', 'nier', 'forest'];
-        const normalized = valid.includes(theme) ? theme : 'dark';
-        document.body.dataset.theme = normalized;
+        const validThemes = ['graphite', 'nier'];
+        const nextTheme = validThemes.includes(theme) ? theme : 'graphite';
+        document.body.dataset.theme = nextTheme;
+        if (themeSelect) themeSelect.value = nextTheme;
+        localStorage.setItem('studioTheme', nextTheme);
     }
 
     searchInput.addEventListener('input', debounce((e) => {
@@ -1510,9 +1585,17 @@ document.addEventListener('DOMContentLoaded', () => {
         loadImages(true);
     });
 
-    favoritesFilterBtn.addEventListener('click', () => {
+    const toggleFavoritesFilter = () => {
         showFavoritesOnly = !showFavoritesOnly;
-        favoritesFilterBtn.classList.toggle('active', showFavoritesOnly);
+        updateWorkspaceLocation();
+        loadImages(true);
+    };
+    favoritesFilterBtn.addEventListener('click', toggleFavoritesFilter);
+    favoritesToolbarBtn?.addEventListener('click', toggleFavoritesFilter);
+    allImagesBtn?.addEventListener('click', () => {
+        currentFolder = 'default';
+        showFavoritesOnly = false;
+        updateWorkspaceLocation();
         loadImages(true);
     });
 
@@ -1520,14 +1603,34 @@ document.addEventListener('DOMContentLoaded', () => {
     addFolderBtn.addEventListener('click', addNewFolder);
 
     if (themeSelect) {
-        const savedTheme = localStorage.getItem('geminiImageBrowserTheme') || 'dark';
-        themeSelect.value = savedTheme;
-        applyTheme(savedTheme);
+        applyTheme(localStorage.getItem('studioTheme') || 'graphite');
+        themeSelect.addEventListener('change', (event) => applyTheme(event.target.value));
+    }
 
-        themeSelect.addEventListener('change', (e) => {
-            const selected = e.target.value;
-            applyTheme(selected);
-            localStorage.setItem('geminiImageBrowserTheme', selected);
+    if (studioShell && sidebarCollapseBtn) {
+        const setSidebarCollapsed = (collapsed) => {
+            studioShell.classList.toggle('sidebar-collapsed', collapsed);
+            sidebarCollapseBtn.textContent = collapsed ? '›' : '‹';
+            sidebarCollapseBtn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+            sidebarCollapseBtn.setAttribute('aria-label', sidebarCollapseBtn.title);
+            sidebarCollapseBtn.setAttribute('aria-expanded', String(!collapsed));
+            localStorage.setItem('studioSidebarCollapsed', String(collapsed));
+        };
+        setSidebarCollapsed(localStorage.getItem('studioSidebarCollapsed') === 'true');
+        sidebarCollapseBtn.addEventListener('click', () => {
+            const next = !studioShell.classList.contains('sidebar-collapsed');
+            setSidebarCollapsed(next);
+        });
+    }
+
+    if (thumbnailSize) {
+        const savedSize = Number(localStorage.getItem('studioThumbnailSize')) || 220;
+        thumbnailSize.value = String(savedSize);
+        document.documentElement.style.setProperty('--thumb-size', `${savedSize}px`);
+        thumbnailSize.addEventListener('input', () => {
+            const size = Number(thumbnailSize.value);
+            document.documentElement.style.setProperty('--thumb-size', `${size}px`);
+            localStorage.setItem('studioThumbnailSize', String(size));
         });
     }
 
@@ -1594,13 +1697,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     folderBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        folderDropdown.classList.toggle('active');
+        const expanded = folderDropdown.classList.toggle('active');
+        folderBtn.classList.toggle('active', expanded);
+        folderBtn.setAttribute('aria-expanded', String(expanded));
     });
 
     document.addEventListener('click', (e) => {
-        if (!folderDropdown.contains(e.target) && !folderBtn.contains(e.target)) {
-            folderDropdown.classList.remove('active');
-        }
         hideContextMenu();
     });
 

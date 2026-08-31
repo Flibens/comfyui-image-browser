@@ -187,7 +187,10 @@ class MetadataParsingTests(unittest.TestCase):
                                     "id": 42,
                                     "type": "CLIPTextEncode",
                                     "mode": 0,
-                                    "inputs": [{"name": "clip", "link": 10}],
+                                    "inputs": [
+                                        {"name": "clip", "link": 10},
+                                        {"name": "input_2", "widget": {"name": "text"}},
+                                    ],
                                     "widgets_values": ["inside subgraph prompt"],
                                 }
                             ],
@@ -202,10 +205,96 @@ class MetadataParsingTests(unittest.TestCase):
         node_ids = {node["id"] for node in nodes}
         self.assertIn("1", node_ids)
         self.assertIn("subgraph-abc:42", node_ids)
-        self.assertNotIn("2", node_ids)
+        self.assertIn("2", node_ids)
+        muted_node = next(node for node in nodes if node["id"] == "2")
+        self.assertEqual(muted_node["mode"], 2)
         subgraph_node = next(node for node in nodes if node["id"] == "subgraph-abc:42")
         self.assertEqual(subgraph_node["type"], "CLIPTextEncode")
         self.assertTrue(any(param["name"] == "subgraph" and param["value"] == "Qwen Text-to-image (Subgraph)" for param in subgraph_node["params"]))
+        self.assertTrue(any(param["name"] == "clip" and param["value"] == "10" for param in subgraph_node["params"]))
+        self.assertTrue(any(param["name"] == "input_2" and param["value"] == "inside subgraph prompt" for param in subgraph_node["params"]))
+        self.assertFalse(any(param["name"].startswith("widget_") for param in subgraph_node["params"]))
+
+    def test_split_sampler_showtext_and_model_priority_match_lumavault(self):
+        graph = {
+            "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "pixel-dit.safetensors"}},
+            "2": {"class_type": "SamplerCustom", "inputs": {"noise_seed": 3, "cfg": 1.0, "positive": ["6", 0], "negative": ["7", 0]}},
+            "3": {"class_type": "BasicScheduler", "inputs": {"scheduler": "simple", "steps": 4}},
+            "4": {"class_type": "AILab_QwenVL", "inputs": {"model_name": "Qwen3-VL-2B-Instruct", "seed": 99}},
+            "5": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "lcm"}},
+            "6": {"class_type": "CLIPTextEncode", "inputs": {"text": ["4", 0]}},
+            "7": {"class_type": "CLIPTextEncode", "inputs": {"text": "low quality"}, "_meta": {"title": "Negative Prompt"}},
+            "8": {"class_type": "ShowText|pysssss", "inputs": {"text_0": "a luminous mushroom forest", "text": ["4", 0]}},
+        }
+
+        parsed = ib.parse_comfy_metadata({"prompt": graph})
+
+        self.assertEqual(parsed["prompt"], "a luminous mushroom forest")
+        self.assertEqual(parsed["negative_prompt"], "low quality")
+        self.assertEqual(parsed["model"], "pixel-dit.safetensors")
+        self.assertEqual(parsed["seed"], 3)
+        self.assertEqual(parsed["steps"], 4)
+        self.assertEqual(parsed["cfg"], 1.0)
+        self.assertEqual(parsed["sampler"], "lcm")
+        self.assertEqual(parsed["scheduler"], "simple")
+
+    def test_lora_manager_only_reports_active_structured_entries(self):
+        metadata = {"workflow": {"nodes": [{
+            "id": 61,
+            "type": "Lora Stacker (LoraManager)",
+            "mode": 0,
+            "widgets_values": [
+                "<lora:active_style:0.80> <lora:unused_style:1.00>",
+                [],
+                [
+                    {"name": "active_style", "strength": 0.8, "clipStrength": 0.6, "active": True},
+                    {"name": "unused_style", "strength": 1.0, "clipStrength": 1.0, "active": False},
+                ],
+            ],
+        }]}}
+
+        parsed = ib.parse_comfy_metadata(metadata)
+
+        self.assertEqual(parsed["loras"], [{
+            "name": "active_style",
+            "strength_model": 0.8,
+            "strength_clip": 0.6,
+        }])
+
+    def test_conditioning_without_text_does_not_turn_model_name_into_prompt(self):
+        graph = {
+            "model": {"class_type": "UNETLoader", "inputs": {"unet_name": "seedvr2_7b_int8_convrot.safetensors"}},
+            "conditioning": {"class_type": "SeedVR2Conditioning", "inputs": {"model": ["model", 0], "vae_conditioning": ["latent", 0]}},
+            "sampler": {"class_type": "KSampler", "inputs": {"positive": ["conditioning", 0], "negative": ["conditioning", 1], "model": ["model", 0]}},
+        }
+
+        parsed = ib.parse_comfy_metadata({"prompt": graph})
+
+        self.assertIsNone(parsed["prompt"])
+        self.assertIsNone(parsed["negative_prompt"])
+        self.assertEqual(parsed["model"], "seedvr2_7b_int8_convrot.safetensors")
+
+    def test_sampler_custom_advanced_resolves_linked_helpers(self):
+        graph = {
+            "noise": {"class_type": "RandomNoise", "inputs": {"noise_seed": 821767337667846}},
+            "guider": {"class_type": "CFGGuider", "inputs": {"cfg": 1.0}},
+            "sampler_select": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+            "sigmas": {"class_type": "ManualSigmas", "inputs": {"sigmas": "1., 0.9, 0.7, 0.4, 0.0"}},
+            "sampler": {"class_type": "SamplerCustomAdvanced", "inputs": {
+                "noise": ["noise", 0],
+                "guider": ["guider", 0],
+                "sampler": ["sampler_select", 0],
+                "sigmas": ["sigmas", 0],
+            }},
+        }
+
+        parsed = ib.parse_comfy_metadata({"prompt": graph})
+
+        self.assertEqual(parsed["seed"], 821767337667846)
+        self.assertEqual(parsed["cfg"], 1.0)
+        self.assertEqual(parsed["sampler"], "euler")
+        self.assertEqual(parsed["steps"], 4)
+        self.assertEqual(parsed["scheduler"], "manual sigmas")
 
 
 if __name__ == "__main__":

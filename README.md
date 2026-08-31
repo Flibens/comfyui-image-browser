@@ -8,13 +8,13 @@ A custom ComfyUI image browser with search, favorites, metadata inspection, and 
 ![Image Viewer + Metadata](screenshots/image-browser-viewer.png)
 
 ## Features :sparkles:
+- Studio-style media workspace with fixed library navigation and tools
+- Graphite and Nier Automata themes
 - Gallery view for images, videos, and audio files
-- Search by filename
-- Favorites system with filter
-- Fullscreen modal preview with keyboard navigation
-- Compare mode with slider (pick two images)
-- Metadata panel (prompts, settings, LoRAs, raw metadata, file info)
-- Folder manager (add/remove external folders, filter by folder/all)
+- Search, sorting, favorites, multi-select, and A/B compare mode
+- Fullscreen viewer with keyboard navigation and a boundary-aware filmstrip
+- Lightweight Details and searchable, expandable Nodes metadata inspector
+- Folder manager with external folders and confirmation-backed right-click removal
 - Video/audio indicators with inline playback
 
 ## Changelog :memo:
