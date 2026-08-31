@@ -4,8 +4,8 @@
 A custom ComfyUI image browser with search, favorites, metadata inspection, and media support. Built to make browsing outputs fast and visual, with a full-screen viewer and compare mode.
 
 ## Screenshots :camera:
-![Image Browser Gallery](screenshots/image-browser-gallery.png)
-![Image Viewer + Metadata](screenshots/image-browser-viewer.png)
+![Image Browser Gallery](screenshots/image-browser-gallery.png?v=1.7.0-studio)
+![Image Viewer + Metadata](screenshots/image-browser-viewer.png?v=1.7.0-studio)
 
 ## Features :sparkles:
 - Studio-style media workspace with fixed library navigation and tools
