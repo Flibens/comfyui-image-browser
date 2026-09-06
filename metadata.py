@@ -424,6 +424,46 @@ def extract_media_dimensions(file_path):
     except Exception:
         return {'width': None, 'height': None}
 
+def _normalized_lora_identity(name):
+    value = _workflow_text(name).strip().replace('\\', '/')
+    for suffix in ('.safetensors', '.ckpt', '.pt', '.bin'):
+        if value.lower().endswith(suffix):
+            value = value[:-len(suffix)]
+            break
+    return value.casefold()
+
+
+def _normalized_lora_basename(name):
+    return _normalized_lora_identity(name).rsplit('/', 1)[-1]
+
+
+def _lora_names_equivalent(first, second):
+    return _normalized_lora_identity(first) == _normalized_lora_identity(second)
+
+
+def _parameter_lora_hash_names(text):
+    """Return LoRA names explicitly recorded as applied by a parameters exporter."""
+    names = set()
+    lora_hashes = re.search(r'\bLora hashes:\s*"([^"\n]+)', text, re.IGNORECASE)
+    if lora_hashes:
+        for pair in islice(lora_hashes.group(1).split(','), WORKFLOW_MAX_LORAS):
+            if ':' in pair:
+                names.add(_normalized_lora_identity(pair.rsplit(':', 1)[0]))
+
+    hashes_marker = re.search(r'\bHashes:\s*', text, re.IGNORECASE)
+    if hashes_marker:
+        try:
+            payload, _ = json.JSONDecoder().raw_decode(text[hashes_marker.end():])
+            if isinstance(payload, dict):
+                for key in islice(payload, WORKFLOW_MAX_LORAS * 4):
+                    key_text = _workflow_text(key).strip()
+                    if key_text.lower().startswith('lora:'):
+                        names.add(_normalized_lora_identity(key_text.split(':', 1)[1]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return {name for name in names if name}
+
+
 def _parse_parameters_text(params_text, parsed):
     if not params_text or not isinstance(params_text, str):
         return
@@ -496,17 +536,14 @@ def _parse_parameters_text(params_text, parsed):
 
     # Extra fields
     extra_fields = {
-        "Model hash": r'Model hash:\s*([^,\n]+)',
         "VAE": r'VAE:\s*([^,\n]+)',
         "VAE hash": r'VAE hash:\s*([^,\n]+)',
-        "Clip skip": r'Clip skip:\s*([^,\n]+)',
         "Denoising strength": r'Denoising strength:\s*([\d.]+)',
         "Hires steps": r'Hires steps:\s*([^,\n]+)',
         "Hires upscale": r'Hires upscale:\s*([^,\n]+)',
         "Hires resize": r'Hires resize:\s*([^,\n]+)',
         "Refiner": r'Refiner:\s*([^,\n]+)',
         "Refiner switch": r'Refiner switch:\s*([^,\n]+)',
-        "Version": r'Version:\s*([^,\n]+)',
         "RNG": r'RNG:\s*([^,\n]+)'
     }
     for label, pattern in extra_fields.items():
@@ -514,14 +551,26 @@ def _parse_parameters_text(params_text, parsed):
         if m:
             parsed['extras'][label] = m.group(1).strip()
 
-    # Extract LoRAs from prompt text
-    if text:
-        lora_tags = re.findall(r'<lora:([^:>]+):([\d.]+)>', text)
-        for lora_name, strength in lora_tags:
-            lora_name = lora_name.strip()
-            if lora_name and lora_name not in ['None', '', 'ComfyUI']:
-                if not any(l['name'] == lora_name for l in parsed['loras']):
-                    _add_lora(parsed, lora_name, float(strength), float(strength))
+    # A <lora:...> token in ComfyUI can remain after the LoRA is disabled. The
+    # exporter's applied-hash payload is the authoritative distinction for
+    # parameters-only files.
+    is_comfyui_parameters = bool(re.search(r'\bVersion:\s*ComfyUI\b', text, re.IGNORECASE))
+    applied_hash_names = _parameter_lora_hash_names(text)
+    lora_tags = re.findall(r'<lora:([^:>]+):([\d.]+)>', text)
+    for lora_name, strength in lora_tags:
+        lora_name = lora_name.strip()
+        if applied_hash_names:
+            identity = _normalized_lora_identity(lora_name)
+            if identity not in applied_hash_names:
+                basename_matches = {
+                    applied for applied in applied_hash_names
+                    if '/' not in identity and _normalized_lora_basename(applied) == identity
+                }
+                if len(basename_matches) != 1:
+                    continue
+        elif is_comfyui_parameters:
+            continue
+        _add_lora(parsed, lora_name, float(strength), float(strength))
 
 def _sanitize_prompt_text(prompt_text):
     """Remove inline LoRA tags from display prompt while preserving line structure."""
@@ -968,15 +1017,124 @@ def _add_lora(parsed, name, strength_model=1.0, strength_clip=None):
     lora_name = _workflow_text(name).strip()
     if lora_name in ['None', '', 'ComfyUI']:
         return
-    if any(l['name'] == lora_name for l in parsed['loras']):
-        return
+    new_identity = _normalized_lora_identity(lora_name)
+    new_has_path = '/' in new_identity
     if strength_clip is None:
         strength_clip = strength_model
-    parsed['loras'].append({
+    entry = {
         'name': lora_name,
         'strength_model': strength_model,
         'strength_clip': strength_clip,
-    })
+    }
+    for index, existing in enumerate(parsed['loras']):
+        existing_identity = _normalized_lora_identity(existing['name'])
+        if existing_identity == new_identity:
+            return
+        if _normalized_lora_basename(existing_identity) != _normalized_lora_basename(new_identity):
+            continue
+        existing_has_path = '/' in existing_identity
+        if not existing_has_path and new_has_path:
+            parsed['loras'][index] = entry
+            return
+        if existing_has_path and not new_has_path:
+            return
+        if not existing_has_path and not new_has_path:
+            return
+    parsed['loras'].append(entry)
+
+
+def _structured_lora_entries(values):
+    for value in values:
+        if isinstance(value, dict) and isinstance(value.get('__value__'), list):
+            value = value['__value__']
+        if isinstance(value, list) and value and all(isinstance(item, dict) and 'name' in item for item in value):
+            return value[:WORKFLOW_MAX_PARAMS]
+    return None
+
+
+def _active_api_lora_node_ids(prompt_graph):
+    """Return LoRA nodes on the model path actually selected by samplers/guiders."""
+    model_roots = []
+    for node in prompt_graph.values():
+        if not isinstance(node, dict):
+            continue
+        node_type_l = _node_type(node).lower()
+        inputs = node.get('inputs', {})
+        if not isinstance(inputs, dict):
+            continue
+        is_sampler = 'sampler' in node_type_l and 'select' not in node_type_l
+        if is_sampler:
+            for input_name in ('model', 'guider'):
+                if _is_link_ref(inputs.get(input_name)):
+                    model_roots.append(inputs[input_name])
+
+    if not model_roots:
+        return None
+
+    active_loras = set()
+    visited = set()
+    stack = list(model_roots)
+    while stack and len(visited) < WORKFLOW_MAX_NODES:
+        value = stack.pop()
+        if not _is_link_ref(value):
+            continue
+        node_id = str(value[0])
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+        node = prompt_graph.get(node_id)
+        if not isinstance(node, dict):
+            continue
+        node_type_l = _node_type(node).lower()
+        inputs = node.get('inputs', {})
+        if not isinstance(inputs, dict):
+            continue
+        if 'lora' in node_type_l:
+            active_loras.add(node_id)
+        if 'switch' in node_type_l:
+            selector = next((inputs.get(name) for name in ('switch', 'select', 'index', 'choice') if name in inputs), None)
+            switch_value = _resolve_api_scalar(prompt_graph, selector)
+            normalized_switch = switch_value
+            if isinstance(normalized_switch, str):
+                text_value = normalized_switch.strip().lower()
+                if text_value in {'true', 'yes', 'on'}:
+                    normalized_switch = True
+                elif text_value in {'false', 'no', 'off'}:
+                    normalized_switch = False
+                else:
+                    try:
+                        normalized_switch = int(text_value)
+                    except ValueError:
+                        pass
+            branch_names = (
+                ('on_true', 'true', 'if_true') if bool(normalized_switch)
+                else ('on_false', 'false', 'if_false')
+            )
+            selected = next((inputs[name] for name in branch_names if name in inputs), None)
+            if selected is None:
+                if isinstance(normalized_switch, bool):
+                    branch_index = 1 if normalized_switch else 2
+                elif isinstance(normalized_switch, (int, float)):
+                    branch_index = int(normalized_switch)
+                else:
+                    branch_index = None
+                if branch_index is not None:
+                    numbered_names = (
+                        f'model{branch_index}', f'model_{branch_index}',
+                        f'unet{branch_index}', f'unet_{branch_index}',
+                        f'input{branch_index}', f'input_{branch_index}',
+                    )
+                    selected = next((inputs[name] for name in numbered_names if name in inputs), None)
+            if _is_link_ref(selected):
+                stack.append(selected)
+            continue
+        for name, linked_value in inputs.items():
+            name_l = str(name).lower()
+            follows_model = 'model' in name_l or 'unet' in name_l
+            follows_applied_stack = 'lora' in node_type_l and 'lora' in name_l
+            if _is_link_ref(linked_value) and (follows_model or follows_applied_stack):
+                stack.append(linked_value)
+    return active_loras
 
 
 def parse_comfy_metadata(metadata):
@@ -1096,6 +1254,8 @@ def parse_comfy_metadata(metadata):
 
                 # Extract LoRAs from LoRA Manager, standard loaders, stackers, and custom loaders.
                 if any(kw in node_type_l for kw in ['lora', 'loraloader', 'lora stacker', 'lora_stack']):
+                    if node.get('mode', 0) != 0:
+                        continue
                     try:
                         # LoraManager stores a human-readable string containing every
                         # inventory entry in widget 0 and the authoritative structured
@@ -1176,10 +1336,14 @@ def parse_comfy_metadata(metadata):
                     bounded_node['inputs'] = dict(islice(node_inputs.items(), WORKFLOW_MAX_PORTS))
                 bounded_prompt_graph[node_id] = bounded_node
             prompt_graph = bounded_prompt_graph
+            # The API prompt is the execution graph. Replace speculative LoRAs
+            # collected from the UI workflow snapshot with its selected model path.
+            parsed['loras'] = []
+            active_api_loras = _active_api_lora_node_ids(prompt_graph)
             showtext_snapshots = _build_showtext_snapshots(prompt_graph)
             text_candidates = []
             api_negative_input_seen = False
-            for _, node in prompt_graph.items():
+            for node_id, node in prompt_graph.items():
                 if not isinstance(node, dict):
                     continue
                 node_type = _node_type(node)
@@ -1292,13 +1456,26 @@ def parse_comfy_metadata(metadata):
                                 break
 
                 if any(kw in node_type_l for kw in ['lora', 'loraloader', 'lora_stack', 'lora stacker']):
-                    lora_name = _resolve_api_value(
-                        prompt_graph, node_inputs.get('lora_name') or node_inputs.get('name'),
-                        ['lora_name', 'name'], 'text', showtext_snapshots=showtext_snapshots,
-                    )
-                    strength_model = node_inputs.get('strength_model', node_inputs.get('lora_strength', node_inputs.get('strength', 1.0)))
-                    strength_clip = node_inputs.get('strength_clip', node_inputs.get('clip_strength', node_inputs.get('clipStrength', strength_model)))
-                    _add_lora(parsed, lora_name, strength_model, strength_clip)
+                    if active_api_loras is not None and str(node_id) not in active_api_loras:
+                        continue
+                    structured_loras = _structured_lora_entries(node_inputs.values())
+                    if structured_loras is not None:
+                        for lora_obj in structured_loras:
+                            if lora_obj.get('active', True):
+                                _add_lora(
+                                    parsed,
+                                    lora_obj.get('name'),
+                                    lora_obj.get('strength', 1.0),
+                                    lora_obj.get('clipStrength', lora_obj.get('strength', 1.0)),
+                                )
+                    else:
+                        lora_name = _resolve_api_value(
+                            prompt_graph, node_inputs.get('lora_name') or node_inputs.get('name'),
+                            ['lora_name', 'name'], 'text', showtext_snapshots=showtext_snapshots,
+                        )
+                        strength_model = node_inputs.get('strength_model', node_inputs.get('lora_strength', node_inputs.get('strength', 1.0)))
+                        strength_clip = node_inputs.get('strength_clip', node_inputs.get('clip_strength', node_inputs.get('clipStrength', strength_model)))
+                        _add_lora(parsed, lora_name, strength_model, strength_clip)
 
                 if 'emptylatentimage' in node_type_l or ('latent' in node_type_l and 'width' in node_inputs and 'height' in node_inputs):
                     width_value = _resolve_api_value(

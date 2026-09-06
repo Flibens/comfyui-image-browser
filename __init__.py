@@ -7,6 +7,9 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from aiohttp import web
 import server
@@ -64,6 +67,131 @@ STATE_DIRECTORY = _get_persistent_state_dir()
 LEGACY_STATE_DIRECTORY = STATE_DIRECTORY.parent / "gemini-image-browser"
 ADDITIONAL_FOLDERS_FILE = STATE_DIRECTORY / "folders.json"
 FAVORITES_FILE = STATE_DIRECTORY / "favorites.json"
+
+
+def _get_shared_browser_state_file():
+    override = os.environ.get("LUMAVAULT_SHARED_BROWSER_STATE_FILE")
+    if override:
+        return Path(override).expanduser().resolve()
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data) / "LumaVault" / "shared-comfyui-image-browser.json"
+    return STATE_DIRECTORY / "shared-comfyui-image-browser.json"
+
+
+SHARED_BROWSER_STATE_FILE = _get_shared_browser_state_file()
+_SHARED_STATE_THREAD_LOCK = threading.RLock()
+_SHARED_STATE_LOCK_DEPTH = threading.local()
+
+
+@contextmanager
+def _shared_state_file_lock():
+    depth = getattr(_SHARED_STATE_LOCK_DEPTH, "value", 0)
+    if depth:
+        _SHARED_STATE_LOCK_DEPTH.value = depth + 1
+        try:
+            yield
+        finally:
+            _SHARED_STATE_LOCK_DEPTH.value = depth
+        return
+
+    with _SHARED_STATE_THREAD_LOCK:
+        lock_path = SHARED_BROWSER_STATE_FILE.with_suffix(SHARED_BROWSER_STATE_FILE.suffix + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            _SHARED_STATE_LOCK_DEPTH.value = 1
+            try:
+                yield
+            finally:
+                _SHARED_STATE_LOCK_DEPTH.value = 0
+                handle.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _normalize_shared_collections(value):
+    if not isinstance(value, dict):
+        return None
+    raw_folders = value.get("folders", [])
+    raw_favorites = value.get("favorites", [])
+    if not isinstance(raw_folders, list) or not isinstance(raw_favorites, list):
+        return None
+    folders = []
+    known_ids = set()
+    for folder in raw_folders:
+        if not isinstance(folder, dict):
+            continue
+        folder_id = str(folder.get("id") or "").strip()
+        name = str(folder.get("name") or "").strip()
+        path = str(folder.get("path") or "").strip()
+        if not folder_id or folder_id == "default" or not name or not path or folder_id in known_ids:
+            continue
+        folders.append({"id": folder_id, "name": name, "path": path})
+        known_ids.add(folder_id)
+    favorites = list(dict.fromkeys(
+        str(item).strip() for item in raw_favorites
+        if isinstance(item, str) and str(item).strip()
+    ))
+    return {"folders": folders, "favorites": favorites}
+
+
+def _read_shared_collections():
+    try:
+        if not SHARED_BROWSER_STATE_FILE.exists():
+            return None
+        return _normalize_shared_collections(json.loads(SHARED_BROWSER_STATE_FILE.read_text(encoding="utf-8")))
+    except Exception:
+        return None
+
+
+def _write_shared_collections(payload):
+    normalized = _normalize_shared_collections(payload)
+    if normalized is None:
+        return
+    try:
+        with _shared_state_file_lock():
+            SHARED_BROWSER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=SHARED_BROWSER_STATE_FILE.parent,
+                    prefix=f".{SHARED_BROWSER_STATE_FILE.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as handle:
+                    temporary = Path(handle.name)
+                    json.dump({"version": 1, **normalized}, handle, indent=2)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, SHARED_BROWSER_STATE_FILE)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+    except Exception as error:
+        print(f"Error saving shared LumaVault browser state: {error}")
+        raise
+
+
+def _is_shared_collection_file(file_path):
+    try:
+        return Path(file_path).resolve() in {ADDITIONAL_FOLDERS_FILE.resolve(), FAVORITES_FILE.resolve()}
+    except Exception:
+        return False
 
 # --- Helper Functions ---
 def _is_relative_to(path_obj, base_obj):
@@ -133,6 +261,10 @@ def _resolve_file_from_request(base_dir, request_path):
     return full_path
 
 def load_json(file_path):
+    if _is_shared_collection_file(file_path):
+        shared = _read_shared_collections()
+        if shared is not None:
+            return shared["folders"] if Path(file_path).resolve() == ADDITIONAL_FOLDERS_FILE.resolve() else shared["favorites"]
     if not file_path.exists():
         return []
 
@@ -164,8 +296,34 @@ def load_json(file_path):
         return []
 
 def save_json(data, file_path):
+    if _is_shared_collection_file(file_path):
+        with _shared_state_file_lock():
+            shared = _read_shared_collections() or {"folders": [], "favorites": []}
+            if Path(file_path).resolve() == ADDITIONAL_FOLDERS_FILE.resolve():
+                shared["folders"] = data
+            else:
+                shared["favorites"] = data
+            _write_shared_collections(shared)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+        return
     with open(file_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2)
+
+def _read_local_json_list(file_path):
+    try:
+        if not Path(file_path).exists():
+            return []
+        parsed = json.loads(Path(file_path).read_text(encoding="utf-8"))
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _write_local_json_list(data, file_path):
+    Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(file_path).write_text(json.dumps(data, indent=2), encoding="utf-8")
+
 
 def _initialize_persistent_state():
     migrations = [
@@ -185,9 +343,21 @@ def _initialize_persistent_state():
                 shutil.copy2(legacy_file, persistent_file)
                 print(f"[ComfyUI Image Browser] Migrated {legacy_file.name} -> {persistent_file}")
             else:
-                save_json([], persistent_file)
+                _write_local_json_list([], persistent_file)
         except Exception as e:
             print(f"[ComfyUI Image Browser] Failed to initialize {persistent_file}: {e}")
+
+    with _shared_state_file_lock():
+        local = {
+            "folders": _read_local_json_list(ADDITIONAL_FOLDERS_FILE),
+            "favorites": _read_local_json_list(FAVORITES_FILE),
+        }
+        shared = _read_shared_collections()
+        if shared is None:
+            shared = local
+        _write_shared_collections(shared)
+        _write_local_json_list(shared["folders"], ADDITIONAL_FOLDERS_FILE)
+        _write_local_json_list(shared["favorites"], FAVORITES_FILE)
 
 # Metadata parsing is kept in a standalone module so the same hardened parser can
 # be exercised without importing ComfyUI. The UI intentionally consumes only the
@@ -397,6 +567,18 @@ async def get_metadata_endpoint(request):
         traceback.print_exc()
         return web.json_response({'error': str(e)}, status=500)
 
+def _toggle_favorite(fav_key):
+    with _shared_state_file_lock():
+        favorites = load_json(FAVORITES_FILE)
+        is_favorite = fav_key not in favorites
+        if is_favorite:
+            favorites.append(fav_key)
+        else:
+            favorites.remove(fav_key)
+        save_json(favorites, FAVORITES_FILE)
+    return is_favorite
+
+
 @server.PromptServer.instance.routes.post("/gemini-image-browser/favorite")
 async def toggle_favorite_endpoint(request):
     data = await request.json()
@@ -405,13 +587,7 @@ async def toggle_favorite_endpoint(request):
     if not filename or not folder_id: return web.json_response({'error': 'Missing filename or folder ID'}, status=400)
     
     fav_key = f"{folder_id}:{filename}"
-    favorites = load_json(FAVORITES_FILE)
-    is_favorite = fav_key not in favorites
-    if is_favorite:
-        favorites.append(fav_key)
-    else:
-        favorites.remove(fav_key)
-    save_json(favorites, FAVORITES_FILE)
+    is_favorite = _toggle_favorite(fav_key)
     return web.json_response({'success': True, 'is_favorite': is_favorite})
 
 @server.PromptServer.instance.routes.post("/gemini-image-browser/delete")
@@ -442,11 +618,12 @@ async def delete_image_endpoint(request):
         
         # Also remove from favorites if it was favorited
         fav_key = f"{folder_id}:{filename}"
-        favorites = load_json(FAVORITES_FILE)
-        if fav_key in favorites:
-            favorites.remove(fav_key)
-            save_json(favorites, FAVORITES_FILE)
-        
+        with _shared_state_file_lock():
+            favorites = load_json(FAVORITES_FILE)
+            if fav_key in favorites:
+                favorites.remove(fav_key)
+                save_json(favorites, FAVORITES_FILE)
+
         print(f"Deleted file: {file_path}")
         return web.json_response({'success': True})
         
@@ -468,11 +645,12 @@ async def add_folder_endpoint(request):
         return web.json_response({'error': 'Invalid folder path'}, status=400)
     if not normalized_path.exists() or not normalized_path.is_dir():
         return web.json_response({'error': 'Folder does not exist'}, status=400)
-    folders = load_json(ADDITIONAL_FOLDERS_FILE)
-    folder_id = f"folder_{len(folders)}_{os.urandom(2).hex()}"
-    new_folder = {'id': folder_id, 'name': name, 'path': str(normalized_path)}
-    folders.append(new_folder)
-    save_json(folders, ADDITIONAL_FOLDERS_FILE)
+    with _shared_state_file_lock():
+        folders = load_json(ADDITIONAL_FOLDERS_FILE)
+        folder_id = f"folder_{len(folders)}_{os.urandom(2).hex()}"
+        new_folder = {'id': folder_id, 'name': name, 'path': str(normalized_path)}
+        folders.append(new_folder)
+        save_json(folders, ADDITIONAL_FOLDERS_FILE)
     return web.json_response({'success': True, 'folder': new_folder})
 
 @server.PromptServer.instance.routes.post("/gemini-image-browser/remove_folder")
@@ -481,9 +659,10 @@ async def remove_folder_endpoint(request):
     folder_id = data.get('folder_id')
     if not folder_id: return web.json_response({'error': 'Missing folder_id'}, status=400)
     
-    folders = load_json(ADDITIONAL_FOLDERS_FILE)
-    folders = [f for f in folders if f.get('id') != folder_id]
-    save_json(folders, ADDITIONAL_FOLDERS_FILE)
+    with _shared_state_file_lock():
+        folders = load_json(ADDITIONAL_FOLDERS_FILE)
+        folders = [f for f in folders if f.get('id') != folder_id]
+        save_json(folders, ADDITIONAL_FOLDERS_FILE)
     return web.json_response({'success': True})
 
 @server.PromptServer.instance.routes.get("/gemini-image-browser/thumbnail")
