@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.1] - 2026-09-06
+- Report only LoRAs corroborated as active by execution graphs, LoRA Manager/Stacker data, or applied LoRA hashes, excluding disabled, bypassed, disconnected, and unselected branches.
+- Preserve distinct folder-qualified LoRAs that share a filename while deduplicating equivalent path/extension spellings.
+- Hide noisy exporter-only `Model hash`, `Clip skip`, and `Version` fields from generation details.
+- Share favorites and custom folders safely with LumaVault using atomic, cross-process updates that preserve intentional clears and recover from malformed shared state without erasing the untouched collection.
+- Added regression coverage for active model paths, numbered switches, disconnected guiders, collection concurrency, write failures, and malformed shared state.
+
 ## [1.7.0] - 2026-08-31
 - Rebuilt the browser as a Studio-style media workspace with fixed navigation, fixed library tools, a dense gallery, a dedicated viewer, and a persistent Details/Nodes inspector.
 - Added Graphite and Nier Automata visual themes, including high-contrast Nier selection, A/B compare, active-filmstrip, and Open Compare states.
