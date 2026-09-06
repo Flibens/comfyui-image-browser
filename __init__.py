@@ -298,7 +298,12 @@ def load_json(file_path):
 def save_json(data, file_path):
     if _is_shared_collection_file(file_path):
         with _shared_state_file_lock():
-            shared = _read_shared_collections() or {"folders": [], "favorites": []}
+            shared = _read_shared_collections()
+            if shared is None:
+                shared = {
+                    "folders": _read_local_json_list(ADDITIONAL_FOLDERS_FILE),
+                    "favorites": _read_local_json_list(FAVORITES_FILE),
+                }
             if Path(file_path).resolve() == ADDITIONAL_FOLDERS_FILE.resolve():
                 shared["folders"] = data
             else:

@@ -138,6 +138,28 @@ class MetadataParsingTests(unittest.TestCase):
         self.assertEqual(state["folders"], folders)
         self.assertEqual(state["favorites"], favorites)
 
+    def test_malformed_shared_state_preserves_untouched_local_collection(self):
+        root = Path(tempfile.mkdtemp(prefix="image-browser-malformed-shared-"))
+        shared_file = root / "shared.json"
+        favorites_file = root / "favorites.json"
+        folders_file = root / "folders.json"
+        folder = {"id": "album", "name": "Album", "path": str(root / "album")}
+        shared_file.write_text("{malformed", encoding="utf-8")
+        favorites_file.write_text("[]", encoding="utf-8")
+        folders_file.write_text(json.dumps([folder]), encoding="utf-8")
+
+        old_paths = (ib.SHARED_BROWSER_STATE_FILE, ib.FAVORITES_FILE, ib.ADDITIONAL_FOLDERS_FILE)
+        try:
+            ib.SHARED_BROWSER_STATE_FILE = shared_file
+            ib.FAVORITES_FILE = favorites_file
+            ib.ADDITIONAL_FOLDERS_FILE = folders_file
+            ib.save_json(["default:a.png"], favorites_file)
+            state = json.loads(shared_file.read_text(encoding="utf-8"))
+            self.assertEqual(state["folders"], [folder])
+            self.assertEqual(state["favorites"], ["default:a.png"])
+        finally:
+            ib.SHARED_BROWSER_STATE_FILE, ib.FAVORITES_FILE, ib.ADDITIONAL_FOLDERS_FILE = old_paths
+
     def test_shared_write_failure_does_not_update_local_mirror(self):
         root = Path(tempfile.mkdtemp(prefix="image-browser-write-failure-"))
         shared_file = root / "shared.json"
